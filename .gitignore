@@ -1,0 +1,17 @@
+# Zephyr build and cache output
+build/
+.zephyr-cache/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Local files
+.env
+*.log
+Fast.txt
+
+# Keep only shared VS Code files
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json

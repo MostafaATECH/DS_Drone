@@ -1,0 +1,90 @@
+{
+  "version": "2.0.0",
+  "inputs": [
+    {
+      "id": "board",
+      "type": "promptString",
+      "description": "Zephyr board target",
+      "default": "nucleo_wl55jc/stm32wl55xx"
+    }
+  ],
+  "tasks": [
+    {
+      "label": "West: Build",
+      "type": "process",
+      "command": "${env:USERPROFILE}/zephyrproject/.venv/Scripts/west.exe",
+      "args": [
+        "build",
+        "-d",
+        "${workspaceFolder}/build",
+        "${workspaceFolder}",
+        "--",
+        "-DCONF_FILE=${workspaceFolder}/confs/prj_nucleo_wl55jc.conf",
+        "-DDTC_OVERLAY_FILE=${workspaceFolder}/boards/nucleo_wl55jc.overlay"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "ZEPHYR_BASE": "${env:USERPROFILE}/zephyrproject/zephyr",
+          "ZEPHYR_TOOLCHAIN_VARIANT": "zephyr",
+          "ZEPHYR_SDK_INSTALL_DIR": "${env:USERPROFILE}/Desktop/University programing/tools/zephyr-sdk-1.0.1",
+          "PYTHONDONTWRITEBYTECODE": "1"
+        }
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "West: Pristine Build",
+      "type": "process",
+      "command": "${env:USERPROFILE}/zephyrproject/.venv/Scripts/west.exe",
+      "args": [
+        "build",
+        "--pristine=always",
+        "--board",
+        "${input:board}",
+        "-d",
+        "${workspaceFolder}/build",
+        "${workspaceFolder}",
+        "--",
+        "-DCONF_FILE=${workspaceFolder}/confs/prj_nucleo_wl55jc.conf",
+        "-DDTC_OVERLAY_FILE=${workspaceFolder}/boards/nucleo_wl55jc.overlay"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "ZEPHYR_BASE": "${env:USERPROFILE}/zephyrproject/zephyr",
+          "ZEPHYR_TOOLCHAIN_VARIANT": "zephyr",
+          "ZEPHYR_SDK_INSTALL_DIR": "${env:USERPROFILE}/Desktop/University programing/tools/zephyr-sdk-1.0.1",
+          "PYTHONDONTWRITEBYTECODE": "1"
+        }
+      },
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "West: Flash",
+      "type": "process",
+      "command": "${env:USERPROFILE}/zephyrproject/.venv/Scripts/west.exe",
+      "args": [
+        "flash",
+        "-d",
+        "${workspaceFolder}/build",
+        "--runner",
+        "openocd"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "ZEPHYR_BASE": "${env:USERPROFILE}/zephyrproject/zephyr",
+          "ZEPHYR_TOOLCHAIN_VARIANT": "zephyr",
+          "ZEPHYR_SDK_INSTALL_DIR": "${env:USERPROFILE}/Desktop/University programing/tools/zephyr-sdk-1.0.1",
+          "PYTHONDONTWRITEBYTECODE": "1"
+        }
+      },
+      "problemMatcher": []
+    }
+  ]
+}
