@@ -2,14 +2,14 @@
 
 Each PC represents one drone. Its STM32 reads an MPU6050 and sends measurements over USB. A Python gateway on the PC adds a simulated GPS position and publishes JSON to the MQTT broker. Cristian's Node-RED dashboard subscribes to the same topics for both drones. The optional Logitech camera plugs into the PC and runs local inference.
 
-The STM32 firmware calibrates the IMU, handles B1 and RGB, and sends readings over USB. The PC gateway reads those frames, adds simulated GPS, and prints the results locally. The MQTT and camera sections describe the planned interfaces.
+The STM32 firmware calibrates the IMU, handles B1 and RGB, and sends readings over USB. The PC gateway reads those frames, adds simulated GPS, and sends telemetry and status to HiveMQ. For now, the gateway reports the camera as `DISABLED`.
 
 ## Project layout
 
 | Location | Responsibility |
 | --- | --- |
 | `src/`, `Include/` | STM32 application and C headers. `imu.c` calibrates, samples, and processes the IMU. `board_io.c` handles B1 and the RGB LED. `main.c` owns the stream state and serial output. |
-| `MQTT_Communication/` | `run_gateway.py` combines the input from `read_stm32_serial.py` and `replay_gps.py`. MQTT transport and the incident logger will be added here. |
+| `MQTT_Communication/` | `run_gateway.py` combines the input from `read_stm32_serial.py` and `replay_gps.py`. `publish_mqtt.py` owns the MQTT connection, topic construction, and publishing. |
 | `AI_Vision/` | Optional camera capture, local detection, annotation, and JPEG encoding. The offline image test uses the same vision functions. |
 | `Test/` | Focused checks, offline image tester, and local outputs. This is the existing casing on disk. |
 | `boards/`, `confs/`, `.vscode/`, `CMakeLists.txt`, `build/` | Existing Zephyr board settings, configuration, VS Code tasks, and generated build output. |
@@ -71,9 +71,9 @@ Use the ST-LINK port from the port listing if Windows assigns a different number
 3. Reset the board and check that it starts green and calibrates again. If testing a disconnected IMU at startup, turn off power before removing or reconnecting its wires. With the sensor disconnected, expect red and regular `ERROR` status lines.
 4. Exit the monitor with `Ctrl+]` before opening the same COM port from the Python reader. If testing USB reconnection, reopen the monitor and reset the board to capture the full startup sequence.
 
-## Run the local gateway on Windows
+## Run the gateway on Windows
 
-Close Miniterm or any other serial monitor first. From PowerShell, create the environment once and install the serial dependency.
+Close Miniterm or any other serial monitor first. From PowerShell, create the environment once and install or update the gateway dependencies.
 
 ```powershell
 Set-Location "$env:USERPROFILE\Desktop\DS_Drone"
@@ -84,17 +84,19 @@ python -m venv .venv
 
 The gateway loads `config.example.json` by default. Create `config.local.json` in the repo root to override only the settings you need. Git ignores this file. For example, `{"serial":{"port":"COM3"}}` fixes the port to COM3. Set `port` to `null` for automatic discovery. Automatic discovery requires a unique ST-LINK match (`0483:374E`) and remembers its USB serial number when available. You can set `serial.usb_serial_number` from `serial.tools.list_ports -v` to identify a particular board when several are plugged in. Relative GPS paths start at the repo root.
 
-Look for `STM32` status lines when the port or board state changes. An open port stays `DISCONNECTED` until a valid frame arrives. `CALIBRATING` and `PAUSED` can have `stm_connected: true` while `streaming` is false. Once measurements arrive, the gateway prints a `Telemetry` JSON line about once per second using the latest fresh IMU sample. Each sample is printed at most once. A `$DS1,M,...` line can establish streaming if the gateway opens a port mid-stream. When the board has explicitly reported calibration, pause, or error, the gateway waits for `STREAMING` before accepting another measurement.
+Look for `INFO: MQTT connected as dsdrone-4f7c92-drone01` and `STM32` status lines when the port or board state changes. An open port stays `DISCONNECTED` until a valid frame arrives. `CALIBRATING` and `PAUSED` can have `stm_connected: true` while `streaming` is false. Once measurements arrive, the gateway prints a `Telemetry` JSON line about once per second using the latest fresh IMU sample. Each sample is printed at most once. A `$DS1,M,...` line can establish streaming if the gateway opens a port mid-stream. When the board has explicitly reported calibration, pause, or error, the gateway waits for `STREAMING` before accepting another measurement.
 
 In the illustrative frame above, `read_stm32_serial.py` reads `az = 9.81 m/s²` and `gx = 0.57 deg/s`. `replay_gps.py` supplies the first simulated position at `40.3899329, -3.6293443`. `run_gateway.py` keeps `accel_m_s2.z = 9.81`, converts the gyro once to `gyro_rad_s.x ≈ 0.00995`, and uses the PC's UTC receipt time for the IMU timestamp. The fix gets its own UTC replay timestamp. The position stays `null` if a fresh fix is unavailable, including when the route file is missing or invalid.
 
-B1 pause stops telemetry and holds the GPS cursor. A fresh sample after resume uses the next GPS point. USB removal discards the old sample and closes the port on a serial error or after five seconds of silence. The gateway retries every two seconds by default. Automatic discovery follows the same identified board if its COM number changes, and a new session starts with fresh frames. Press `Ctrl+C` to stop the gateway and close the port.
+B1 pause stops telemetry and holds the GPS cursor. A fresh sample after resume uses the next GPS point. USB removal discards the old sample and closes the port on a serial error or after five seconds of silence. The gateway retries every two seconds by default. Automatic discovery follows the same identified board if its COM number changes, and a new session starts with fresh frames. Press `Ctrl+C` to stop the gateway, send offline status, and release the COM port.
 
 Run the synthetic parser and replay checks from the repository root with `& .\.venv\Scripts\python.exe -m unittest discover -s Test -p test_serial_gps.py -v`.
 
 ## MQTT handoff to Node-RED
 
-Each topic is `<topic_root>/<drone_id>/<message_type>`. The default root for Cristian is `aerofleet-dsdrone-4f7c92`. Use `drone01` and `drone02` on the two PCs, with distinct client IDs. The planned classroom broker is `broker.hivemq.com:1883`, MQTT 3.1.1 over TCP, with a 15-second keepalive and no TLS or credentials.
+`drone_topic()` joins `<topic_root>/<drone_id>/<message_type>`. The default root for Cristian is `aerofleet-dsdrone-4f7c92`. Use `drone01` on this PC and put `{"mqtt":{"drone_id":"drone02"}}` in `config.local.json` on the second PC. The derived MQTT client IDs are `dsdrone-4f7c92-drone01` and `dsdrone-4f7c92-drone02`. Set `mqtt.client_id` explicitly if an instance needs a different ID, and give Node-RED its own client ID.
+
+The classroom broker is `broker.hivemq.com:1883`, MQTT 3.1.1 over TCP with a 15-second keepalive. Leave `username` and `password` as `null` and `tls` as `false` for this endpoint. Anyone on the shared public broker can read or publish under the prefix. It reduces accidental topic collisions and provides no access control.
 
 | Message | Node-RED subscription | QoS | Retained | Payload |
 | --- | --- | --- | --- | --- |
@@ -122,7 +124,7 @@ The MPU6050 gives the STM32 six numbers. After calibration, the STM32 sends them
 }
 ```
 
-Send telemetry once per second when a fresh valid measurement is available. The GPS file gives a 1,000 ms interval and 120 looping positions in decimal degrees. Advance only while the calibrated stream is active, freeze the replay during calibration, pause, error, or disconnection, and resume from the next point. Use `position: null` if a current point is unavailable. Simulated movement on the map is independent of the tracker classification. MQTT timestamps use UTC ISO 8601 ending in `Z`.
+The gateway sends telemetry at up to 1 Hz while a fresh valid measurement is available. It drops measurements received before the current MQTT connection so a reconnect starts with new readings. The GPS file gives a 1,000 ms interval and 120 looping positions in decimal degrees. Advance only while the calibrated stream is active, freeze the replay during calibration, pause, error, or disconnection, and resume from the next point. Use `position: null` if a current point is unavailable. Simulated movement on the map is independent of the tracker classification. MQTT timestamps use UTC ISO 8601 ending in `Z`.
 
 | Stream state | `stm_connected` | `streaming` | `imu_status` |
 | --- | --- | --- | --- |
@@ -132,6 +134,22 @@ Send telemetry once per second when a fresh valid measurement is available. The 
 | `ERROR` | `true` | `false` | `ERROR` |
 | `DISCONNECTED` | `false` | `false` | `UNAVAILABLE` |
 
-`online` describes the PC gateway's broker connection and can stay `true` when the board is unplugged. Report status on each MQTT connection, on changes, and once per second. The retained QoS 1 Last Will is `{"online":false}`. When the gateway goes offline, the dashboard should show the board's condition as unknown. The dashboard should check status freshness and its own broker connection. It should show calibration or pause while those states have fresh status, and mark measurements stale after five seconds without telemetry in `STREAMING`.
+`MqttPublisher.publish_update()` sends full status after each MQTT connection, when the STM32 status changes, and about once per second. B1 pause keeps `online` and `stm_connected` true, sets `stream_state` to `PAUSED`, and stops telemetry. Unplugging the STM32 keeps `online` true and reports `stm_connected: false` and `DISCONNECTED`. Paho's network loop runs throughout both cases.
 
-Camera status is `AVAILABLE`, `UNAVAILABLE`, `DISABLED`, or `ERROR`. Incidents and previews come from the camera and can continue while STM32 measurements are paused. Use `position: null` on an incident when the last simulated fix is over five seconds old. Match incident metadata and JPEG previews by drone ID and `event_id`. The logger can use the same pair to discard QoS 1 duplicates.
+The gateway registers the retained QoS 1 Last Will `{"online":false}` before connecting. HiveMQ sends it when it detects unexpected loss of the gateway connection. On `Ctrl+C`, `MqttPublisher.close()` explicitly publishes the same retained offline payload and waits briefly for its acknowledgement. When the dashboard sees `online: false`, the current board state is unknown. During `STREAMING`, mark measurements stale after five seconds without telemetry. Check status age and the dashboard's own broker connection too.
+
+MQTT delivery happens in two exchanges. First the gateway publishes to HiveMQ. Then HiveMQ delivers to each subscriber at the QoS allowed by that subscription. Telemetry is QoS 0 and individual readings can be lost. Status is QoS 1 and the receiver of each QoS 1 exchange sends a `PUBACK`, so duplicates are possible. Retaining status lets a new subscriber receive the latest stored value for that topic immediately.
+
+The future camera gateway will use `AVAILABLE`, `UNAVAILABLE`, `DISABLED`, or `ERROR`. Camera incidents and previews can continue while STM32 measurements are paused. Use `position: null` on an incident when the last simulated fix is over five seconds old. Match incident metadata and JPEG previews by drone ID and `event_id`. The logger can use the same pair to discard QoS 1 duplicates.
+
+### Check HiveMQ from PowerShell
+
+From the repository root, the first command checks TCP reachability. The second checks actual MQTT receipt using labelled synthetic data under a unique `<topic_root>/test-…/synthetic/` namespace.
+
+```powershell
+Test-NetConnection broker.hivemq.com -Port 1883
+& .\.venv\Scripts\python.exe -m Test.check_mqtt
+& .\.venv\Scripts\python.exe -m unittest discover -s Test -v
+```
+
+The MQTT check verifies telemetry receipt, retained online status for a late subscriber, the Last Will after abruptly closing TCP, current status after reconnect, and explicit offline status on clean shutdown. The extra topic level keeps these fixtures outside Cristian's dashboard subscriptions. The script removes its retained test status at the end. For a bench check, watch `aerofleet-dsdrone-4f7c92/drone01/status` and `/telemetry` while pressing B1, unplugging only the STM32, and exiting the gateway with `Ctrl+C`. The deliberate TCP failure in the script is the separate Last Will check.

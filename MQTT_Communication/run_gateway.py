@@ -1,4 +1,4 @@
-"""Read STM32 telemetry, add a simulated GPS position, and print local results."""
+"""Read STM32 telemetry, add simulated GPS, and publish gateway updates over MQTT."""
 
 import json
 import logging
@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .publish_mqtt import MqttPublisher, validate_mqtt_settings
 from .read_stm32_serial import Stm32Reader
 from .replay_gps import GpsReplay
 
@@ -47,6 +48,7 @@ def load_settings(root):
                 raise ValueError(f"{section}.{key} must be a positive number")
     if not isinstance(settings["gps"]["path"], str) or not settings["gps"]["path"].strip():
         raise ValueError("gps.path must be a nonempty string")
+    validate_mqtt_settings(settings["mqtt"])
     return settings
 
 
@@ -98,7 +100,7 @@ class Gateway:
 
 
 def main():
-    """Load settings and print local updates until Ctrl+C closes the serial port."""
+    """Run serial polling and MQTT publishing until Ctrl+C closes both connections."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     try:
         settings = load_settings(ROOT)
@@ -115,10 +117,16 @@ def main():
 
     reader = Stm32Reader(settings["serial"])
     gateway = Gateway(reader, replay)
+    publisher = MqttPublisher(settings["mqtt"])
     previous_status = None
     try:
+        publisher.start()
         while True:
-            status, telemetry = gateway.poll(time.monotonic(), utc_now())
+            now = time.monotonic()
+            timestamp = utc_now()
+            status, telemetry = gateway.poll(now, timestamp)
+            measurement_at = gateway.last_reported.received_at if telemetry is not None else None
+            publisher.publish_update(now, timestamp, status, telemetry, measurement_at)
             local_status = {"port": reader.port_name, **status}
             if local_status != previous_status:
                 print("STM32", json.dumps(local_status), flush=True)
@@ -130,6 +138,7 @@ def main():
         print("Gateway stopped.")
     finally:
         reader.close()
+        publisher.close()
     return 0
 
 

@@ -10,5 +10,16 @@
   "gps": {
     "path": "upm_drone_gps_loop.json",
     "freshness_s": 5
+  },
+  "mqtt": {
+    "host": "broker.hivemq.com",
+    "port": 1883,
+    "keepalive_s": 15,
+    "topic_root": "aerofleet-dsdrone-4f7c92",
+    "drone_id": "drone01",
+    "client_id": null,
+    "username": null,
+    "password": null,
+    "tls": false
   }
 }
