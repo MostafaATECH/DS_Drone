@@ -2,7 +2,7 @@
 
 Each PC represents one drone. Its STM32 reads an MPU6050 and sends measurements over USB. A Python gateway on the PC adds a simulated GPS position and publishes JSON to the MQTT broker. Cristian's Node-RED dashboard subscribes to the same topics for both drones. The optional Logitech camera plugs into the PC and runs local inference.
 
-The STM32 firmware calibrates the IMU, handles B1 and RGB, and sends readings over USB. The PC gateway reads those frames, adds simulated GPS, and sends telemetry and status to HiveMQ. For now, the gateway reports the camera as `DISABLED`.
+The STM32 firmware calibrates the IMU, handles B1 and RGB, and sends readings over USB. The PC gateway reads those frames, adds simulated GPS, and sends telemetry and status to HiveMQ. The optional camera runs through the standalone check for now, and the gateway reports it as `DISABLED`.
 
 ## Project layout
 
@@ -10,7 +10,7 @@ The STM32 firmware calibrates the IMU, handles B1 and RGB, and sends readings ov
 | --- | --- |
 | `src/`, `Include/` | STM32 application and C headers. `imu.c` calibrates, samples, and processes the IMU. `board_io.c` handles B1 and the RGB LED. `main.c` owns the stream state and serial output. |
 | `MQTT_Communication/` | `run_gateway.py` combines the input from `read_stm32_serial.py` and `replay_gps.py`. `publish_mqtt.py` owns the MQTT connection, topic construction, and publishing. |
-| `AI_Vision/` | `fire_detection.py` loads the checkpoint, detects fire, and renders the shared JPEG preview. The still-image tool calls this pipeline. |
+| `AI_Vision/` | `fire_detection.py` runs the shared fire detector and JPEG renderer. `camera_stream.py` owns capture and inference on a worker thread. `fire_episodes.py` confirms a local incident from successive frames. |
 | `Test/` | Focused checks, offline image tester, and local outputs. This is the existing casing on disk. |
 | `boards/`, `confs/`, `.vscode/`, `CMakeLists.txt`, `build/` | Existing Zephyr board settings, configuration, VS Code tasks, and generated build output. |
 | Project root | GPS route `upm_drone_gps_loop.json`, model weights `best.pt`, and shared `config.example.json` with per-PC overrides in `config.local.json`. |
@@ -180,3 +180,31 @@ For each new photograph, change `--image` and choose a new filename for `--outpu
 `process_frame()` validates a BGR frame and runs the detector on CPU with image size 640, confidence threshold 0.25, and IoU threshold 0.45. The shared detector selects only the `fire` label from `model.names`. The renderer scales the source boxes to a preview with a longest edge of 640 pixels, preserving aspect ratio and skipping upscaling. It draws two-pixel orange boxes with the label and confidence to two decimal places. The shared encoder returns JPEG bytes at quality 60, which the still-image tool writes directly. It runs independently of the STM32, camera and MQTT gateway.
 
 Run the shared preview checks with `& $projectPython -m unittest discover -s Test -p test_vision_preview.py -v`.
+
+## Check the Logitech camera locally
+
+Install or update `requirements-vision.txt` using the same project interpreter as the photo test. List devices before choosing an index. The standalone check uses the DirectShow backend by default and displays each camera's device name and USB ID. [Camera enumeration reference](https://pypi.org/project/cv2-enumerate-cameras/1.4.0/)
+
+```powershell
+Set-Location "$env:USERPROFILE\Desktop\DS_Drone"
+$projectPython = '.\.venv\Scripts\python.exe'
+& $projectPython -m pip install -r requirements-vision.txt
+& $projectPython -m Test.check_camera --list
+& $projectPython -m Test.check_camera --enable --seconds 18 --output '.\Test\output\logitech_preview.jpg'
+& $projectPython -m Test.check_camera --enable --show
+```
+
+The Brio 100 was `046d:094c` at DirectShow index 1 on this PC. Index 0 was the laptop camera. The default `camera.source` selects the Brio by USB ID, so the worker looks up its current index again when reopening. You can choose an index explicitly using `--source 1` or a numeric `camera.source` in `config.local.json`. Keep `camera.enabled` false on the PC without a camera. `--enable` turns it on for this check. Close the local window with `Q`, `Esc`, or `Ctrl+C`. To check recovery, unplug the Brio, wait for `UNAVAILABLE`, plug it back in, and wait for `AVAILABLE`. The missing-device path can also be exercised with `--enable --source ffff:ffff --seconds 6`.
+
+| State | Meaning |
+| --- | --- |
+| `DISABLED` | Camera support is off and the detector is unloaded. |
+| `UNAVAILABLE` | Waiting for the chosen device, unable to open it, or unable to read a frame. |
+| `AVAILABLE` | The worker has processed a frame and produced a preview. |
+| `ERROR` | A dependency, checkpoint, inference, or capture backend failed. The check prints the cause. |
+
+`CameraWorker` reads and processes one frame at a time on its own thread. It uses the same `process_frame()` as the photo test, so boxes, labels and JPEG settings match. It replaces the latest preview in one slot and keeps up to 16 pending local incident notifications for the check to drain. It releases the camera after a failure and waits `camera.retry_s` seconds before reopening, initially five. Shutdown signals the worker and waits briefly for the active capture or inference call to finish.
+
+The demo uses the shared confidence threshold of 0.25 when `camera.confidence` is `null`. A number in `config.local.json` overrides it for live capture. One positive frame can show orange boxes in the preview. After three consecutive processed frames with a fire detection, the tracker creates one local incident with a stable `drone01-fire-…` ID. It rearms after two seconds of observed absence. Change `camera.confirmation_frames` or `camera.absence_s` to tune these demo choices. Camera interruptions reset an unconfirmed streak and preserve a confirmed ID while the scene is unobserved. The detector selects the checkpoint's `fire` label by name.
+
+For the episode check, point the Brio at a screen showing the fire photograph, hold it in view, then remove it from view for at least two seconds. Watch for one `Confirmed fire` line per episode. MQTT incident and preview publication is covered in the next phase. The camera unit checks use `& $projectPython -m unittest discover -s Test -p test_camera_stream.py -v`.

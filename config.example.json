@@ -21,5 +21,15 @@
     "username": null,
     "password": null,
     "tls": false
+  },
+  "camera": {
+    "enabled": false,
+    "source": "046d:094c",
+    "backend": "dshow",
+    "model": "best.pt",
+    "confidence": null,
+    "confirmation_frames": 3,
+    "absence_s": 2,
+    "retry_s": 5
   }
 }

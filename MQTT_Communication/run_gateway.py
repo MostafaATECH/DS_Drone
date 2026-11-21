@@ -5,33 +5,21 @@ import logging
 import math
 import time
 from datetime import datetime, timezone
-from pathlib import Path
+
+from project_config import ROOT, load_config
 
 from .publish_mqtt import MqttPublisher, validate_mqtt_settings
 from .read_stm32_serial import Stm32Reader
 from .replay_gps import GpsReplay
 
 
-ROOT = Path(__file__).resolve().parent.parent
 TELEMETRY_INTERVAL_S = 1.0
 POLL_INTERVAL_S = 0.02
 
 
 def load_settings(root):
     """Read shared defaults and merge any per-PC JSON settings into their sections."""
-    settings = json.loads((root / "config.example.json").read_text(encoding="utf-8-sig"))
-    override_path = root / "config.local.json"
-    if override_path.exists():
-        overrides = json.loads(override_path.read_text(encoding="utf-8-sig"))
-        if not isinstance(overrides, dict):
-            raise ValueError("config.local.json must contain an object")
-        for section, values in overrides.items():
-            if section not in settings or not isinstance(values, dict):
-                raise ValueError(f"invalid configuration section: {section}")
-            unknown = values.keys() - settings[section].keys()
-            if unknown:
-                raise ValueError(f"unknown {section} setting: {', '.join(sorted(unknown))}")
-            settings[section].update(values)
+    settings = load_config(root)
 
     for key in ("port", "usb_serial_number"):
         value = settings["serial"][key]

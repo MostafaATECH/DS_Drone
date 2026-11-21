@@ -13,12 +13,12 @@ if __name__ == "__main__":
     sys.path.insert(0, str(ROOT))
 
 
-def preview_path(output, image_path, model_path):
-    """Require a JPEG path in DS_Drone that cannot overwrite either input."""
+def preview_path(output, *protected_paths):
+    """Require a JPEG path in DS_Drone that cannot overwrite protected inputs."""
     path = output.resolve()
     if not path.is_relative_to(ROOT) or path.suffix.lower() not in {".jpg", ".jpeg"}:
         raise ValueError("Output must be a .jpg or .jpeg path inside DS_Drone")
-    for source in (image_path, model_path):
+    for source in protected_paths:
         if path == source.resolve() or (path.exists() and source.exists() and path.samefile(source)):
             raise ValueError(f"Output would overwrite an input: {path}")
     return path
