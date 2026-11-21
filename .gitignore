@@ -5,11 +5,23 @@ build/
 # Python cache
 __pycache__/
 *.pyc
+.pytest_cache/
+.venv/
+venv/
 
 # Local files
 .env
+.env.local
+/config.local.json
+/PROJECT_PROGRESS.md
 *.log
 Fast.txt
+
+# Local model weights and generated test output
+*.pt
+/[Tt]est/output/
+/[Tt]est/logs/
+/[Tt]est/*.jsonl
 
 # Keep only shared VS Code files
 .vscode/*
