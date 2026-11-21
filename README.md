@@ -1,15 +1,15 @@
 # DS Drone
 
-Each PC represents one drone. Its STM32 reads an MPU6050 and sends measurements over USB. A Python gateway on the PC adds a simulated GPS position and publishes JSON to the MQTT broker. Cristian's Node-RED dashboard subscribes to the same topics for both drones. The optional Logitech camera plugs into the PC and runs local inference.
+Each PC represents one drone. Its STM32 reads an MPU6050 and sends measurements over USB. A Python gateway on the PC adds a simulated GPS position and publishes JSON to the MQTT broker. Cristian can subscribe to the same topics for both drones when the Node-RED dashboard is ready. The optional Logitech camera plugs into the PC and runs local inference.
 
-The STM32 firmware calibrates the IMU, handles B1 and RGB, and sends readings over USB. The PC gateway reads those frames, adds simulated GPS, and sends telemetry and status to HiveMQ. The optional camera runs through the standalone check for now, and the gateway reports it as `DISABLED`.
+The STM32 firmware calibrates the IMU, handles B1 and RGB, and sends readings over USB. The PC gateway reads those frames, adds simulated GPS, and sends telemetry and status to HiveMQ. When enabled, the camera sends confirmed fire incidents and matching JPEG previews through the same MQTT connection.
 
 ## Project layout
 
 | Location | Responsibility |
 | --- | --- |
 | `src/`, `Include/` | STM32 application and C headers. `imu.c` calibrates, samples, and processes the IMU. `board_io.c` handles B1 and the RGB LED. `main.c` owns the stream state and serial output. |
-| `MQTT_Communication/` | `run_gateway.py` combines the input from `read_stm32_serial.py` and `replay_gps.py`. `publish_mqtt.py` owns the MQTT connection, topic construction, and publishing. |
+| `MQTT_Communication/` | `run_gateway.py` coordinates serial, GPS, and optional camera input. `camera_messages.py` pairs a confirmed incident with its GPS fix and queues the metadata. `publish_mqtt.py` owns the MQTT connection and publishes all four topic types. |
 | `AI_Vision/` | `fire_detection.py` runs the shared fire detector and JPEG renderer. `camera_stream.py` owns capture and inference on a worker thread. `fire_episodes.py` confirms a local incident from successive frames. |
 | `Test/` | Focused checks, offline image tester, and local outputs. This is the existing casing on disk. |
 | `boards/`, `confs/`, `.vscode/`, `CMakeLists.txt`, `build/` | Existing Zephyr board settings, configuration, VS Code tasks, and generated build output. |
@@ -84,6 +84,14 @@ python -m venv .venv
 
 The gateway loads `config.example.json` by default. Create `config.local.json` in the repo root to override only the settings you need. Git ignores this file. For example, `{"serial":{"port":"COM3"}}` fixes the port to COM3. Set `port` to `null` for automatic discovery. Automatic discovery requires a unique ST-LINK match (`0483:374E`) and remembers its USB serial number when available. You can set `serial.usb_serial_number` from `serial.tools.list_ports -v` to identify a particular board when several are plugged in. Relative GPS paths start at the repo root.
 
+The example configuration leaves the camera off. Use `--camera off` to force this mode on a PC with only the base dependencies, or `--camera on` to enable the Brio with the [optional vision dependencies](#test-the-detector-on-a-photograph) installed.
+
+```powershell
+# Choose one command per gateway.
+& .\.venv\Scripts\python.exe -m MQTT_Communication.run_gateway --camera off
+& .\.venv\Scripts\python.exe -m MQTT_Communication.run_gateway --camera on
+```
+
 Look for `INFO: MQTT connected as dsdrone-4f7c92-drone01` and `STM32` status lines when the port or board state changes. An open port stays `DISCONNECTED` until a valid frame arrives. `CALIBRATING` and `PAUSED` can have `stm_connected: true` while `streaming` is false. Once measurements arrive, the gateway prints a `Telemetry` JSON line about once per second using the latest fresh IMU sample. Each sample is printed at most once. A `$DS1,M,...` line can establish streaming if the gateway opens a port mid-stream. When the board has explicitly reported calibration, pause, or error, the gateway waits for `STREAMING` before accepting another measurement.
 
 In the illustrative frame above, `read_stm32_serial.py` reads `az = 9.81 m/s²` and `gx = 0.57 deg/s`. `replay_gps.py` supplies the first simulated position at `40.3899329, -3.6293443`. `run_gateway.py` keeps `accel_m_s2.z = 9.81`, converts the gyro once to `gyro_rad_s.x ≈ 0.00995`, and uses the PC's UTC receipt time for the IMU timestamp. The fix gets its own UTC replay timestamp. The position stays `null` if a fresh fix is unavailable, including when the route file is missing or invalid.
@@ -134,13 +142,25 @@ The gateway sends telemetry at up to 1 Hz while a fresh valid measurement is ava
 | `ERROR` | `true` | `false` | `ERROR` |
 | `DISCONNECTED` | `false` | `false` | `UNAVAILABLE` |
 
-`MqttPublisher.publish_update()` sends full status after each MQTT connection, when the STM32 status changes, and about once per second. B1 pause keeps `online` and `stm_connected` true, sets `stream_state` to `PAUSED`, and stops telemetry. Unplugging the STM32 keeps `online` true and reports `stm_connected: false` and `DISCONNECTED`. Paho's network loop runs throughout both cases.
+`MqttPublisher.publish_update()` sends full status after each MQTT connection, when the STM32 or camera status changes, and about once per second. B1 pause keeps `online` and `stm_connected` true, sets `stream_state` to `PAUSED`, and stops telemetry. Unplugging the STM32 keeps `online` true and reports `stm_connected: false` and `DISCONNECTED`. Camera capture and Paho's network loop run throughout both cases. `camera_status` reports `AVAILABLE`, `UNAVAILABLE`, `DISABLED`, or `ERROR` independently of the board.
 
 The gateway registers the retained QoS 1 Last Will `{"online":false}` before connecting. HiveMQ sends it when it detects unexpected loss of the gateway connection. On `Ctrl+C`, `MqttPublisher.close()` explicitly publishes the same retained offline payload and waits briefly for its acknowledgement. When the dashboard sees `online: false`, the current board state is unknown. During `STREAMING`, mark measurements stale after five seconds without telemetry. Check status age and the dashboard's own broker connection too.
 
 MQTT delivery happens in two exchanges. First the gateway publishes to HiveMQ. Then HiveMQ delivers to each subscriber at the QoS allowed by that subscription. Telemetry is QoS 0 and individual readings can be lost. Status is QoS 1 and the receiver of each QoS 1 exchange sends a `PUBACK`, so duplicates are possible. Retaining status lets a new subscriber receive the latest stored value for that topic immediately.
 
-The future camera gateway will use `AVAILABLE`, `UNAVAILABLE`, `DISABLED`, or `ERROR`. Camera incidents and previews can continue while STM32 measurements are paused. Use `position: null` on an incident when the last simulated fix is over five seconds old. Match incident metadata and JPEG previews by drone ID and `event_id`. The logger can use the same pair to discard QoS 1 duplicates.
+### Match a fire incident and its preview
+
+The Brio's worker passes each frame through the same `process_frame()` used by the photo tester. Three consecutive positive frames confirm a fire episode. The gateway copies the latest simulated fix that existed when the confirming frame was captured. That position represents the observing drone. The ground fire location is unknown. An incident still goes out with `position: null` if there was no valid fix or that fix was over five seconds old at capture time.
+
+The incident goes to `aerofleet-dsdrone-4f7c92/drone01/incident` at QoS 1. The gateway holds pending incidents in a bounded in-memory queue and keeps their IDs and position snapshots across retries. The latest annotated JPEG for the active episode goes to `aerofleet-dsdrone-4f7c92/drone01/preview` at QoS 0, at most once a second. `mqtt.preview_max_bytes` caps the complete JSON payload including Base64 at 120,000 bytes by default. A skipped preview produces a diagnostic and leaves incident metadata independent. Both fire topics are non-retained.
+
+For example, an incident without a recent simulated fix looks like this.
+
+```json
+{"event_id":"drone01-fire-example","timestamp":"2026-11-21T10:00:05Z","type":"fire","confidence":0.92,"position":null}
+```
+
+Cristian can subscribe to the `+/incident` and `+/preview` filters in the table. Read the drone ID from the second topic segment, then store both messages under the pair `(drone_id, event_id)`. Either message can arrive first. Use the same pair to handle duplicate QoS 1 incidents. The preview payload has `event_id`, `timestamp`, and `image_base64`. Create the browser image URL with `"data:image/jpeg;base64," + payload.image_base64`.
 
 ### Check HiveMQ from PowerShell
 
@@ -153,6 +173,24 @@ Test-NetConnection broker.hivemq.com -Port 1883
 ```
 
 The MQTT check verifies telemetry receipt, retained online status for a late subscriber, the Last Will after abruptly closing TCP, current status after reconnect, and explicit offline status on clean shutdown. The extra topic level keeps these fixtures outside Cristian's dashboard subscriptions. The script removes its retained test status at the end. For a bench check, watch `aerofleet-dsdrone-4f7c92/drone01/status` and `/telemetry` while pressing B1, unplugging only the STM32, and exiting the gateway with `Ctrl+C`. The deliberate TCP failure in the script is the separate Last Will check.
+
+### Try the fire topics before Node-RED is ready
+
+1. In PowerShell from DS_Drone, run the watcher first. Wait for `Watching` so it can receive the non-retained messages.
+
+   ```powershell
+   & .\.venv\Scripts\python.exe -m Test.check_fire_mqtt --watch
+   ```
+
+2. In a second PowerShell window from DS_Drone, start one camera-enabled gateway. Wait for `Camera AVAILABLE`, then point the Brio at the fire photograph on a screen. Keep the camera aimed at the intended demo image when using the public broker.
+
+   ```powershell
+   & .\.venv\Scripts\python.exe -m MQTT_Communication.run_gateway --camera on
+   ```
+
+3. The watcher prints when it receives metadata and saves the first matched JPEG as `Test/output/mqtt_fire_preview.jpg`. If the episode started before the watcher subscribed, clear the camera view of the fire image for at least two seconds and show the image again. Stop the gateway with `Ctrl+C`.
+
+For an independent broker check, run `& .\.venv\Scripts\python.exe -m Test.check_fire_mqtt`. It sends labelled synthetic metadata and a generated JPEG on a separate test namespace and verifies receipt without using the camera or STM32.
 
 ## Test the detector on a photograph
 
@@ -207,4 +245,4 @@ The Brio 100 was `046d:094c` at DirectShow index 1 on this PC. Index 0 was the l
 
 The demo uses the shared confidence threshold of 0.25 when `camera.confidence` is `null`. A number in `config.local.json` overrides it for live capture. One positive frame can show orange boxes in the preview. After three consecutive processed frames with a fire detection, the tracker creates one local incident with a stable `drone01-fire-…` ID. It rearms after two seconds of observed absence. Change `camera.confirmation_frames` or `camera.absence_s` to tune these demo choices. Camera interruptions reset an unconfirmed streak and preserve a confirmed ID while the scene is unobserved. The detector selects the checkpoint's `fire` label by name.
 
-For the episode check, point the Brio at a screen showing the fire photograph, hold it in view, then remove it from view for at least two seconds. Watch for one `Confirmed fire` line per episode. MQTT incident and preview publication is covered in the next phase. The camera unit checks use `& $projectPython -m unittest discover -s Test -p test_camera_stream.py -v`.
+For the local episode check, point the Brio at a screen showing the fire photograph, hold it in view, then remove it from view for at least two seconds. Watch for one `Confirmed fire` line per episode. The camera unit checks use `& $projectPython -m unittest discover -s Test -p test_camera_stream.py -v`.

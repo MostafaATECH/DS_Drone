@@ -1,5 +1,6 @@
-"""Read STM32 telemetry, add simulated GPS, and publish gateway updates over MQTT."""
+"""Publish STM32 telemetry, simulated GPS, and optional fire detections over MQTT."""
 
+import argparse
 import json
 import logging
 import math
@@ -8,6 +9,7 @@ from datetime import datetime, timezone
 
 from project_config import ROOT, load_config
 
+from .camera_messages import CameraMessages
 from .publish_mqtt import MqttPublisher, validate_mqtt_settings
 from .read_stm32_serial import Stm32Reader
 from .replay_gps import GpsReplay
@@ -87,8 +89,21 @@ class Gateway:
         return status, telemetry
 
 
-def main():
-    """Run serial polling and MQTT publishing until Ctrl+C closes both connections."""
+def make_camera(settings, drone_id):
+    """Create the camera worker only when the local settings enable it."""
+    if settings["enabled"] is False:
+        return None
+
+    from AI_Vision.camera_stream import CameraWorker, load_camera_settings
+
+    return CameraWorker(load_camera_settings(settings), drone_id)
+
+
+def main(argv=None):
+    """Run the gateway with optional camera capture until Ctrl+C shuts it down."""
+    parser = argparse.ArgumentParser(description="Run one DS Drone gateway.")
+    parser.add_argument("--camera", choices=("on", "off"), help="override camera.enabled for this run")
+    args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     try:
         settings = load_settings(ROOT)
@@ -106,15 +121,42 @@ def main():
     reader = Stm32Reader(settings["serial"])
     gateway = Gateway(reader, replay)
     publisher = MqttPublisher(settings["mqtt"])
+    if args.camera is not None:
+        settings["camera"]["enabled"] = args.camera == "on"
+    camera_status = "DISABLED"
+    camera = None
+    try:
+        camera = make_camera(settings["camera"], settings["mqtt"]["drone_id"])
+    except (ImportError, OSError, ValueError, OverflowError) as error:
+        camera_status = "ERROR"
+        logging.error("Camera ERROR: %s", error)
+    if camera_status == "DISABLED" and camera is None:
+        logging.info("Camera DISABLED")
+
+    camera_messages = CameraMessages(publisher, replay) if camera is not None else None
+    previous_camera_status = None
     previous_status = None
     try:
         publisher.start()
+        if camera is not None:
+            camera.start()
         while True:
             now = time.monotonic()
             timestamp = utc_now()
             status, telemetry = gateway.poll(now, timestamp)
             measurement_at = gateway.last_reported.received_at if telemetry is not None else None
-            publisher.publish_update(now, timestamp, status, telemetry, measurement_at)
+            if camera is not None:
+                snapshot = camera.snapshot()
+                camera_status = snapshot.state
+                state = (snapshot.state, snapshot.detail)
+                if state != previous_camera_status:
+                    log = logging.warning if camera_status == "ERROR" else logging.info
+                    log("Camera %s: %s", *state)
+                    previous_camera_status = state
+            publisher.publish_update(now, timestamp, status, telemetry, measurement_at,
+                                     camera_status=camera_status)
+            if camera is not None:
+                camera_messages.publish_updates(time.monotonic(), snapshot.frame, camera.take_incidents())
             local_status = {"port": reader.port_name, **status}
             if local_status != previous_status:
                 print("STM32", json.dumps(local_status), flush=True)
@@ -126,7 +168,11 @@ def main():
         print("Gateway stopped.")
     finally:
         reader.close()
-        publisher.close()
+        try:
+            publisher.close()
+        finally:
+            if camera is not None and not camera.stop():
+                logging.warning("Camera driver did not return before the shutdown timeout")
     return 0
 
 

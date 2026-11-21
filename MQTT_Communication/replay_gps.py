@@ -1,6 +1,7 @@
 """Replay the simulated GPS route while the STM32 supplies fresh readings."""
 
 import json
+from collections import deque
 
 
 def load_route(path):
@@ -32,7 +33,7 @@ def load_route(path):
 
 
 class GpsReplay:
-    """Keep the next route index and the timestamp of the last emitted fix."""
+    """Keep the next route index and recent timed fixes for telemetry and incidents."""
 
     def __init__(self, path, freshness_s):
         """Load the route once and start at its first sample."""
@@ -40,8 +41,7 @@ class GpsReplay:
         self.freshness_s = freshness_s
         self.cursor = 0
         self.next_fix_at = None
-        self.last_fix = None
-        self.last_fix_at = None
+        self.fixes = deque(maxlen=128)
 
     def update(self, now, timestamp, active):
         """Emit a due fix only during active streaming. After a pause, emit the next point."""
@@ -53,15 +53,16 @@ class GpsReplay:
         if self.next_fix_at is not None and now < self.next_fix_at:
             return
 
-        self.last_fix = {**self.positions[self.cursor], "fix_timestamp": timestamp}
-        self.last_fix_at = now
+        fix = {**self.positions[self.cursor], "fix_timestamp": timestamp}
+        self.fixes.append((now, fix))
         self.next_fix_at = now + self.interval_s
         self.cursor += 1
         if self.loop and self.cursor == len(self.positions):
             self.cursor = 0
 
     def latest_position(self, now):
-        """Return a copy of the latest fix while it is within the configured age limit."""
-        if self.last_fix_at is None or now - self.last_fix_at > self.freshness_s:
-            return None
-        return self.last_fix.copy()
+        """Copy the freshest fix that already existed at the supplied monotonic time."""
+        for fix_at, fix in reversed(self.fixes):
+            if fix_at <= now:
+                return fix.copy() if now - fix_at <= self.freshness_s else None
+        return None

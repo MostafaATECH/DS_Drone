@@ -1,5 +1,6 @@
-"""Publish gateway status and live telemetry to the configured MQTT broker."""
+"""Publish gateway status, telemetry, and fire messages on one MQTT connection."""
 
+import base64
 import json
 import logging
 import socket
@@ -12,6 +13,7 @@ import paho.mqtt.client as mqtt
 LOGGER = logging.getLogger(__name__)
 OFFLINE_STATUS = '{"online":false}'
 STATUS_INTERVAL_S = 1.0
+PREVIEW_INTERVAL_S = 1.0
 
 
 def validate_mqtt_settings(settings):
@@ -33,6 +35,9 @@ def validate_mqtt_settings(settings):
         raise ValueError("mqtt.username is required when a password is set")
     if type(settings["tls"]) is not bool:
         raise ValueError("mqtt.tls must be true or false")
+    limit = settings["preview_max_bytes"]
+    if type(limit) is not int or limit < 1:
+        raise ValueError("mqtt.preview_max_bytes must be a positive integer")
 
 
 def drone_topic(topic_root, drone_id, message_type):
@@ -49,6 +54,8 @@ class MqttPublisher:
         self.client_id = settings["client_id"] or f"dsdrone-4f7c92-{settings['drone_id']}"
         self.status_topic = drone_topic(settings["topic_root"], settings["drone_id"], "status")
         self.telemetry_topic = drone_topic(settings["topic_root"], settings["drone_id"], "telemetry")
+        self.incident_topic = drone_topic(settings["topic_root"], settings["drone_id"], "incident")
+        self.preview_topic = drone_topic(settings["topic_root"], settings["drone_id"], "preview")
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=self.client_id,
                                   protocol=mqtt.MQTTv311, clean_session=True)
         self.client.will_set(self.status_topic, OFFLINE_STATUS, qos=1, retain=True)
@@ -67,6 +74,8 @@ class MqttPublisher:
         self.last_status = None
         self.next_status_at = 0.0
         self.next_telemetry_at = 0.0
+        self.next_preview_at = 0.0
+        self.last_preview = None
 
     def start(self):
         """Start connecting on Paho's worker thread without blocking serial polling."""
@@ -95,20 +104,29 @@ class MqttPublisher:
         if reason_code.is_failure:
             LOGGER.warning("MQTT connection lost: %s. Retrying.", reason_code)
 
-    def publish_update(self, now, timestamp, board_status, telemetry=None, measurement_at=None):
-        """Publish due status and send only telemetry received during this broker connection."""
+    def _connection_at(self, now):
+        """Return the current broker connection time when this poll can publish."""
         with self.connection_lock:
-            connected_at = self.connected_at
-        if connected_at is None or now < connected_at or not self.client.is_connected():
+            started = self.connected_at
+            if started is not None and now >= started and self.client.is_connected():
+                return started
+        return None
+
+    def publish_update(self, now, timestamp, board_status, telemetry=None, measurement_at=None,
+                       *, camera_status="DISABLED"):
+        """Publish due status and send only telemetry received during this broker connection."""
+        connected_at = self._connection_at(now)
+        if connected_at is None:
             return
 
         # Paho takes its own queue lock for QoS 1, so publish status without the callback lock.
-        if (connected_at, board_status) != self.last_status or now >= self.next_status_at:
+        states = (connected_at, board_status, camera_status)
+        if states != self.last_status or now >= self.next_status_at:
             status = {"online": True, "timestamp": timestamp, **board_status,
-                      "camera_status": "DISABLED"}
+                      "camera_status": camera_status}
             info = self.client.publish(self.status_topic, json.dumps(status), qos=1, retain=True)
             if info.rc == mqtt.MQTT_ERR_SUCCESS:
-                self.last_status = (connected_at, board_status.copy())
+                self.last_status = (connected_at, board_status.copy(), camera_status)
                 self.next_status_at = now + STATUS_INTERVAL_S
 
         if (not board_status["streaming"] or telemetry is None or measurement_at is None
@@ -119,6 +137,39 @@ class MqttPublisher:
                 info = self.client.publish(self.telemetry_topic, json.dumps(telemetry), qos=0, retain=False)
                 if info.rc == mqtt.MQTT_ERR_SUCCESS:
                     self.next_telemetry_at = now + 1.0
+
+    def publish_incident(self, now, incident):
+        """Hand one incident to Paho for asynchronous QoS 1 delivery and retry."""
+        if self._connection_at(now) is None:
+            return False
+        info = self.client.publish(self.incident_topic, json.dumps(incident), qos=1, retain=False)
+        # Paho retains a QoS 1 packet if the socket disappears during publish.
+        return info.rc in (mqtt.MQTT_ERR_SUCCESS, mqtt.MQTT_ERR_NO_CONN)
+
+    def publish_preview(self, now, frame):
+        """Offer one fresh annotated JPEG per second, with a cap on the full JSON payload."""
+        if frame is None or not frame.event_id or not frame.detections or now < self.next_preview_at:
+            return
+        connected_at = self._connection_at(now)
+        key = (frame.event_id, frame.captured_monotonic)
+        if connected_at is None or not connected_at <= frame.captured_monotonic <= now or key == self.last_preview:
+            return
+
+        self.last_preview = key
+        self.next_preview_at = now + PREVIEW_INTERVAL_S
+        payload = {"event_id": frame.event_id, "timestamp": frame.captured_at, "image_base64": ""}
+        encoded_size = 4 * ((len(frame.jpeg) + 2) // 3)
+        payload_size = len(json.dumps(payload, separators=(",", ":")).encode("utf-8")) + encoded_size
+        limit = self.settings["preview_max_bytes"]
+        if payload_size > limit:
+            LOGGER.warning("Skipped preview for %s (%d bytes, limit %d)", frame.event_id, payload_size, limit)
+            return
+
+        payload["image_base64"] = base64.b64encode(frame.jpeg).decode("ascii")
+        with self.connection_lock:
+            if self.connected_at == connected_at and self.client.is_connected():
+                self.client.publish(self.preview_topic, json.dumps(payload, separators=(",", ":")),
+                                    qos=0, retain=False)
 
     def close(self):
         """Publish offline, wait briefly for PUBACK, then stop the MQTT network loop."""

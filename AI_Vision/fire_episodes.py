@@ -11,6 +11,7 @@ class FireIncident:
     event_id: str
     timestamp: str
     confidence: float
+    observed_at: float
     type: str = "fire"
 
 
@@ -51,5 +52,5 @@ class FireEpisodeTracker:
             return None
 
         event_id = f"{self.drone_id}-fire-{uuid4().hex}"
-        self.active_incident = FireIncident(event_id, timestamp, confidence)
+        self.active_incident = FireIncident(event_id, timestamp, confidence, now)
         return self.active_incident

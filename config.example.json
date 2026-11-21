@@ -20,7 +20,8 @@
     "client_id": null,
     "username": null,
     "password": null,
-    "tls": false
+    "tls": false,
+    "preview_max_bytes": 120000
   },
   "camera": {
     "enabled": false,

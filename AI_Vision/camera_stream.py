@@ -40,6 +40,7 @@ class CameraFrame:
     detections: tuple
     event_id: str | None
     captured_at: str
+    captured_monotonic: float
 
 
 @dataclass(frozen=True)
@@ -170,7 +171,7 @@ class CameraWorker:
         confidence = max((detection.confidence for detection in detections), default=None)
         incident = self.episodes.observe(now, timestamp, confidence)
         active = self.episodes.active_incident
-        frame = CameraFrame(jpeg, tuple(detections), active.event_id if active else None, timestamp)
+        frame = CameraFrame(jpeg, tuple(detections), active.event_id if active else None, timestamp, now)
         overflow = False
         with self._lock:
             self._snapshot = CameraSnapshot("AVAILABLE", name, frame)
