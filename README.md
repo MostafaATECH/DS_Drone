@@ -9,7 +9,7 @@ The STM32 firmware calibrates the IMU, handles B1 and RGB, and sends readings ov
 | Location | Responsibility |
 | --- | --- |
 | `src/`, `Include/` | STM32 application and C headers. `imu.c` calibrates, samples, and processes the IMU. `board_io.c` handles B1 and the RGB LED. `main.c` owns the stream state and serial output. |
-| `MQTT_Communication/` | `run_gateway.py` coordinates serial, GPS, and optional camera input. `camera_messages.py` pairs a confirmed incident with its GPS fix and queues the metadata. `publish_mqtt.py` owns the MQTT connection and publishes all four topic types. |
+| `MQTT_Communication/` | `run_gateway.py` coordinates serial, GPS, and optional camera input. `publish_mqtt.py` publishes on the shared connection. `log_incidents.py` independently subscribes and saves incident records. |
 | `AI_Vision/` | `fire_detection.py` runs the shared fire detector and JPEG renderer. `camera_stream.py` owns capture and inference on a worker thread. `fire_episodes.py` confirms a local incident from successive frames. |
 | `Test/` | Focused checks, offline image tester, and local outputs. This is the existing casing on disk. |
 | `boards/`, `confs/`, `.vscode/`, `CMakeLists.txt`, `build/` | Existing Zephyr board settings, configuration, VS Code tasks, and generated build output. |
@@ -102,6 +102,8 @@ Run the synthetic parser and replay checks from the repository root with `& .\.v
 
 ## MQTT handoff to Node-RED
 
+Cristian's implementation reference contains the four payload examples, filters, status and freshness rules, and bench checks. [MQTT topics and payloads](MQTT_Communication/MQTT_Topics_and_Payloads.md)
+
 `drone_topic()` joins `<topic_root>/<drone_id>/<message_type>`. The default root for Cristian is `aerofleet-dsdrone-4f7c92`. Use `drone01` on this PC and put `{"mqtt":{"drone_id":"drone02"}}` in `config.local.json` on the second PC. The derived MQTT client IDs are `dsdrone-4f7c92-drone01` and `dsdrone-4f7c92-drone02`. Set `mqtt.client_id` explicitly if an instance needs a different ID, and give Node-RED its own client ID.
 
 The classroom broker is `broker.hivemq.com:1883`, MQTT 3.1.1 over TCP with a 15-second keepalive. Leave `username` and `password` as `null` and `tls` as `false` for this endpoint. Anyone on the shared public broker can read or publish under the prefix. It reduces accidental topic collisions and provides no access control.
@@ -191,6 +193,20 @@ The MQTT check verifies telemetry receipt, retained online status for a late sub
 3. The watcher prints when it receives metadata and saves the first matched JPEG as `Test/output/mqtt_fire_preview.jpg`. If the episode started before the watcher subscribed, clear the camera view of the fire image for at least two seconds and show the image again. Stop the gateway with `Ctrl+C`.
 
 For an independent broker check, run `& .\.venv\Scripts\python.exe -m Test.check_fire_mqtt`. It sends labelled synthetic metadata and a generated JPEG on a separate test namespace and verifies receipt without using the camera or STM32.
+
+## Log incidents to JSON Lines
+
+In a separate PowerShell window from DS_Drone, start the independent consumer. Wait for `Listening` before generating a fire episode. `Ctrl+C` stops it. Only the base requirements are needed.
+
+```powershell
+& .\.venv\Scripts\python.exe -m MQTT_Communication.log_incidents
+```
+
+The logger subscribes to `aerofleet-dsdrone-4f7c92/+/incident` at QoS 1. It writes `Test/output/incidents.jsonl`, adding the drone ID from the topic. It checks the payload and skips malformed data with a warning. It reads saved `(drone_id, event_id)` pairs before connecting, so restarting it against the same file still skips repeated IDs. Use one logger per output file. For a separate run, pass `--output .\Test\output\my_incidents.jsonl`. The output directory is ignored by Git.
+
+Local deduplication prevents repeated rows for IDs already saved in that file. The logger uses a clean MQTT session and the incidents are non-retained, so incidents published while it is disconnected may be missed. The file can also be lost or damaged locally. QoS 1 and local deduplication provide two separate guarantees and do not establish end-to-end exactly-once delivery.
+
+Test the logger without the STM32, camera, or Node-RED by running `& .\.venv\Scripts\python.exe -m Test.check_incident_logger`. It uses labelled synthetic messages in a separate namespace.
 
 ## Test the detector on a photograph
 
