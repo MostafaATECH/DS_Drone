@@ -2,18 +2,18 @@
 
 Each PC represents one drone. Its STM32 reads an MPU6050 and sends measurements over USB. A Python gateway on the PC adds a simulated GPS position and publishes JSON to the MQTT broker. Cristian's Node-RED dashboard subscribes to the same topics for both drones. The optional Logitech camera plugs into the PC and runs local inference.
 
-The STM32 firmware calibrates the IMU, handles B1 and RGB, and sends readings over USB. The PC gateway, camera, and MQTT behavior below describe the planned interfaces.
+The STM32 firmware calibrates the IMU, handles B1 and RGB, and sends readings over USB. The PC gateway reads those frames, adds simulated GPS, and prints the results locally. The MQTT and camera sections describe the planned interfaces.
 
 ## Project layout
 
 | Location | Responsibility |
 | --- | --- |
 | `src/`, `Include/` | STM32 application and C headers. `imu.c` calibrates, samples, and processes the IMU. `board_io.c` handles B1 and the RGB LED. `main.c` owns the stream state and serial output. |
-| `MQTT_Communication/` | One Python gateway entry point, with separate serial reading and GPS replay. The gateway owns the MQTT connection and publishes combined status. An independent incident logger subscribes to the broker. |
+| `MQTT_Communication/` | `run_gateway.py` combines the input from `read_stm32_serial.py` and `replay_gps.py`. MQTT transport and the incident logger will be added here. |
 | `AI_Vision/` | Optional camera capture, local detection, annotation, and JPEG encoding. The offline image test uses the same vision functions. |
 | `Test/` | Focused checks, offline image tester, and local outputs. This is the existing casing on disk. |
 | `boards/`, `confs/`, `.vscode/`, `CMakeLists.txt`, `build/` | Existing Zephyr board settings, configuration, VS Code tasks, and generated build output. |
-| Project root | GPS route `upm_drone_gps_loop.json`, local weights `best.pt`, and future shared `config.example.json` with per-PC overrides in `config.local.json`. |
+| Project root | GPS route `upm_drone_gps_loop.json`, model weights `best.pt`, and shared `config.example.json` with per-PC overrides in `config.local.json`. |
 
 ## STM32 to PC serial contract
 
@@ -70,6 +70,27 @@ Use the ST-LINK port from the port listing if Windows assigns a different number
 2. Press and release B1. Look for red and `PAUSED`. Wait several seconds to confirm that status lines continue while measurement lines stop. Press B1 again and verify blue, `STREAMING`, and new readings.
 3. Reset the board and check that it starts green and calibrates again. If testing a disconnected IMU at startup, turn off power before removing or reconnecting its wires. With the sensor disconnected, expect red and regular `ERROR` status lines.
 4. Exit the monitor with `Ctrl+]` before opening the same COM port from the Python reader. If testing USB reconnection, reopen the monitor and reset the board to capture the full startup sequence.
+
+## Run the local gateway on Windows
+
+Close Miniterm or any other serial monitor first. From PowerShell, create the environment once and install the serial dependency.
+
+```powershell
+Set-Location "$env:USERPROFILE\Desktop\DS_Drone"
+python -m venv .venv
+& .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+& .\.venv\Scripts\python.exe -m MQTT_Communication.run_gateway
+```
+
+The gateway loads `config.example.json` by default. Create `config.local.json` in the repo root to override only the settings you need. Git ignores this file. For example, `{"serial":{"port":"COM3"}}` fixes the port to COM3. Set `port` to `null` for automatic discovery. Automatic discovery requires a unique ST-LINK match (`0483:374E`) and remembers its USB serial number when available. You can set `serial.usb_serial_number` from `serial.tools.list_ports -v` to identify a particular board when several are plugged in. Relative GPS paths start at the repo root.
+
+Look for `STM32` status lines when the port or board state changes. An open port stays `DISCONNECTED` until a valid frame arrives. `CALIBRATING` and `PAUSED` can have `stm_connected: true` while `streaming` is false. Once measurements arrive, the gateway prints a `Telemetry` JSON line about once per second using the latest fresh IMU sample. Each sample is printed at most once. A `$DS1,M,...` line can establish streaming if the gateway opens a port mid-stream. When the board has explicitly reported calibration, pause, or error, the gateway waits for `STREAMING` before accepting another measurement.
+
+In the illustrative frame above, `read_stm32_serial.py` reads `az = 9.81 m/s²` and `gx = 0.57 deg/s`. `replay_gps.py` supplies the first simulated position at `40.3899329, -3.6293443`. `run_gateway.py` keeps `accel_m_s2.z = 9.81`, converts the gyro once to `gyro_rad_s.x ≈ 0.00995`, and uses the PC's UTC receipt time for the IMU timestamp. The fix gets its own UTC replay timestamp. The position stays `null` if a fresh fix is unavailable, including when the route file is missing or invalid.
+
+B1 pause stops telemetry and holds the GPS cursor. A fresh sample after resume uses the next GPS point. USB removal discards the old sample and closes the port on a serial error or after five seconds of silence. The gateway retries every two seconds by default. Automatic discovery follows the same identified board if its COM number changes, and a new session starts with fresh frames. Press `Ctrl+C` to stop the gateway and close the port.
+
+Run the synthetic parser and replay checks from the repository root with `& .\.venv\Scripts\python.exe -m unittest discover -s Test -p test_serial_gps.py -v`.
 
 ## MQTT handoff to Node-RED
 

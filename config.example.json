@@ -1,0 +1,14 @@
+{
+  "serial": {
+    "port": null,
+    "usb_serial_number": null,
+    "baud_rate": 115200,
+    "heartbeat_timeout_s": 5,
+    "retry_interval_s": 2,
+    "measurement_freshness_s": 5
+  },
+  "gps": {
+    "path": "upm_drone_gps_loop.json",
+    "freshness_s": 5
+  }
+}
