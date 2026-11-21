@@ -66,13 +66,13 @@ def subscribe(client, settings, topic):
     return inbox
 
 
-def receive(inbox, topic):
-    """Wait for the matching MQTT message and report a receipt timeout clearly."""
-    deadline = time.monotonic() + TIMEOUT
+def receive(inbox, topic, timeout=TIMEOUT, *, payload=None):
+    """Wait for the topic and optionally an exact payload, with a receipt deadline."""
+    deadline = time.monotonic() + timeout
     try:
         while time.monotonic() < deadline:
             message = inbox.get(timeout=max(0, deadline - time.monotonic()))
-            if message.topic == topic:
+            if message.topic == topic and (payload is None or message.payload == payload):
                 return message
     except Empty:
         pass
@@ -147,10 +147,29 @@ def check_round_trip(settings):
                 "the reconnected gateway did not report its current board state")
         print("PASS: gateway reconnected and reported STM32 disconnected while online")
 
+        stale = {**fixture, "phase": "before reconnect"}
+        now = time.monotonic()
+        publisher.publish_update(now, utc_now(), TEST_BOARD, stale, initial_connection)
+        status = json.loads(receive(late_inbox, topic).payload)
+        require(status.get("streaming") is True, "streaming status did not resume")
+        try:
+            receive(inbox, publisher.telemetry_topic, timeout=1)
+        except TimeoutError:
+            pass
+        else:
+            raise ValueError("broker delivered stale telemetry after reconnect")
+
+        fresh = {**fixture, "phase": "after reconnect", "timestamp": utc_now()}
+        now = time.monotonic()
+        publisher.publish_update(now, utc_now(), TEST_BOARD, fresh, now)
+        telemetry = receive(inbox, publisher.telemetry_topic)
+        require(json.loads(telemetry.payload) == fresh and telemetry.qos == 0 and not telemetry.retain,
+                "fresh telemetry did not resume as expected")
+        print("PASS: only fresh synthetic telemetry was delivered after reconnect")
+
         publisher.close()
-        offline = receive(late_inbox, topic)
-        require(offline.payload == OFFLINE_STATUS.encode() and offline.qos == 1,
-                "clean shutdown did not deliver the offline payload")
+        offline = receive(late_inbox, topic, payload=OFFLINE_STATUS.encode())
+        require(offline.qos == 1, "clean shutdown offline status did not arrive at QoS 1")
         print("PASS: clean gateway shutdown delivered offline status")
     finally:
         try:

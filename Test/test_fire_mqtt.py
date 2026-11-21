@@ -61,6 +61,16 @@ class IncidentTests(unittest.TestCase):
                 updates.publish_updates(11, None, (INCIDENT,))
                 self.assertIsNone(publisher.publish_incident.call_args.args[1]["position"])
 
+    def test_incident_skips_fix_with_later_utc_timestamp(self):
+        """Choose the preceding fix when the gateway's UTC clock read was delayed."""
+        replay = GpsReplay(ROOT / "upm_drone_gps_loop.json", freshness_s=5)
+        replay.update(9, "2026-11-21T09:59:59.001Z", active=True)
+        earlier_fix = replay.latest_position(9)
+        replay.update(10, "2026-11-21T10:00:00.001Z", active=True)
+        publisher = Mock()
+        CameraMessages(publisher, replay).publish_updates(11, None, (INCIDENT,))
+        self.assertEqual(publisher.publish_incident.call_args.args[1]["position"], earlier_fix)
+
     def test_disabled_camera_skips_optional_import(self):
         """Do not import the camera module for a camera-disabled gateway."""
         with patch("builtins.__import__", side_effect=AssertionError("camera import was attempted")):

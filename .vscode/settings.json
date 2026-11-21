@@ -11,7 +11,7 @@
     "**/.zephyr-cache": true,
     "**/build": true
   },
-  "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json",
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/build/step02/compile_commands.json",
   "terminal.integrated.env.windows": {
     "PYTHONDONTWRITEBYTECODE": "1"
   }

@@ -20,7 +20,9 @@ class CameraMessages:
     def publish_updates(self, now, frame, incidents):
         """Queue each incident with its original fix, retry metadata, and offer the latest preview."""
         for incident in incidents:
-            position = self.replay.latest_position(incident.observed_at) if self.replay else None
+            position = None
+            if self.replay is not None:
+                position = self.replay.latest_position(incident.observed_at, timestamp=incident.timestamp)
             if len(self.pending) == self.pending.maxlen:
                 LOGGER.warning("Incident queue full. Dropping %s", self.pending[0]["event_id"])
             self.pending.append({

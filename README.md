@@ -64,6 +64,8 @@ $env:PYTHONDONTWRITEBYTECODE = '1'
 & $zephyrPython -m serial.tools.miniterm COM3 115200 --eol CRLF --dtr 0 --rts 0
 ```
 
+The VS Code West tasks use the same `build/step02` directory. Use this build for the demo because the original `build/zephyr` can still contain the template firmware.
+
 Use the ST-LINK port from the port listing if Windows assigns a different number. Place the IMU on a stable surface, open the monitor, and reset the board. Keep the IMU still until the LED turns blue.
 
 1. Check for green with `CALIBRATING` status lines about one second apart, followed by blue, `STREAMING`, and `$DS1,M,...` measurements. A B1 press while green cannot start streaming early.
@@ -104,7 +106,7 @@ Run the synthetic parser and replay checks from the repository root with `& .\.v
 
 Cristian's implementation reference contains the four payload examples, filters, status and freshness rules, and bench checks. [MQTT topics and payloads](MQTT_Communication/MQTT_Topics_and_Payloads.md)
 
-`drone_topic()` joins `<topic_root>/<drone_id>/<message_type>`. The default root for Cristian is `aerofleet-dsdrone-4f7c92`. Use `drone01` on this PC and put `{"mqtt":{"drone_id":"drone02"}}` in `config.local.json` on the second PC. The derived MQTT client IDs are `dsdrone-4f7c92-drone01` and `dsdrone-4f7c92-drone02`. Set `mqtt.client_id` explicitly if an instance needs a different ID, and give Node-RED its own client ID.
+`drone_topic()` joins `<topic_root>/<drone_id>/<message_type>`. The shared root is `aerofleet-dsdrone-4f7c92`. Use the defaults for `drone01` and the [second PC configuration](#set-up-the-second-pc) for `drone02`. The gateways use `dsdrone-4f7c92-drone01` and `dsdrone-4f7c92-drone02` as MQTT client IDs. Cristian can set `dsdrone-4f7c92-cristian-node-red` in the Node-RED broker settings.
 
 The classroom broker is `broker.hivemq.com:1883`, MQTT 3.1.1 over TCP with a 15-second keepalive. Leave `username` and `password` as `null` and `tls` as `false` for this endpoint. Anyone on the shared public broker can read or publish under the prefix. It reduces accidental topic collisions and provides no access control.
 
@@ -262,3 +264,60 @@ The Brio 100 was `046d:094c` at DirectShow index 1 on this PC. Index 0 was the l
 The demo uses the shared confidence threshold of 0.25 when `camera.confidence` is `null`. A number in `config.local.json` overrides it for live capture. One positive frame can show orange boxes in the preview. After three consecutive processed frames with a fire detection, the tracker creates one local incident with a stable `drone01-fire-…` ID. It rearms after two seconds of observed absence. Change `camera.confirmation_frames` or `camera.absence_s` to tune these demo choices. Camera interruptions reset an unconfirmed streak and preserve a confirmed ID while the scene is unobserved. The detector selects the checkpoint's `fire` label by name.
 
 For the local episode check, point the Brio at a screen showing the fire photograph, hold it in view, then remove it from view for at least two seconds. Watch for one `Confirmed fire` line per episode. The camera unit checks use `& $projectPython -m unittest discover -s Test -p test_camera_stream.py -v`.
+
+## Set up the second PC
+
+Open PowerShell in that PC's DS_Drone checkout. Install the base requirements and copy the [drone02 example](config.drone02.example.json). If `config.local.json` already exists, merge the example into it. The local file is ignored by Git.
+
+```powershell
+python -m venv .venv
+$projectPython = '.\.venv\Scripts\python.exe'
+& $projectPython -m pip install -r requirements.txt
+if (-not (Test-Path .\config.local.json)) {
+    Copy-Item .\config.drone02.example.json .\config.local.json
+}
+& $projectPython -m serial.tools.list_ports -v
+```
+
+Leave `serial.port` as `null` for automatic ST-LINK discovery. If needed, set it to the ST-LINK COM port reported on that PC or set `serial.usb_serial_number` to identify one board among several. Keep the shared broker and topic root from `config.example.json`. With the second board running the DS_Drone firmware, run `& $projectPython -m MQTT_Communication.run_gateway --camera off`. Expect `MQTT connected as dsdrone-4f7c92-drone02` and `camera_status: "DISABLED"`.
+
+## Demo recovery checklist
+
+Close any serial monitor before starting the gateway. Start a subscriber first, using Cristian's filters or the following PowerShell command. It shows status and telemetry from both drone IDs and marks retained deliveries. Stop it with `Ctrl+C`.
+
+```powershell
+@'
+from uuid import uuid4
+from project_config import load_config
+from Test.check_mqtt import make_client, subscribe
+
+settings = load_config()["mqtt"]
+root = settings["topic_root"]
+subscriber = make_client(settings, "ds-watch-" + uuid4().hex[:10])
+inbox = subscribe(subscriber, settings, [(f"{root}/+/status", 1), (f"{root}/+/telemetry", 0)])
+try:
+    while True:
+        message = inbox.get()
+        print(message.topic, "retained" if message.retain else "live", message.payload.decode())
+except KeyboardInterrupt:
+    subscriber.disconnect()
+    subscriber.loop_stop()
+'@ | & .\.venv\Scripts\python.exe -u -
+```
+
+1. Start `drone01` with `--camera off`. Reset the STM32 and keep the IMU flat and still. Expect green and `CALIBRATING`, then blue, `STREAMING`, and fresh telemetry every second with advancing simulated GPS points. The real IMU can report `tracker_state: "IDLE"` while `stream_state` is `STREAMING`.
+2. Press B1, wait at least five seconds, then press again. Expect red and `PAUSED`, with continued online/connected status, no telemetry, and the GPS replay cursor held in place. On blue, fresh samples resume at the next route point.
+3. Unplug only the STM32 USB cable, wait for `DISCONNECTED`, then plug it back in. Status stays online throughout. The board reports `stm_connected: false` and telemetry stops while USB is unplugged. Hold the IMU still for green calibration, then expect blue and newly timestamped readings.
+4. Check that the camera-disabled start reports `DISABLED`. Restart with `--camera on`, wait for `AVAILABLE`, then unplug only the Brio. Expect `UNAVAILABLE` while telemetry and status continue. Plug it back in and wait for `AVAILABLE` on the next retry. Use the [fire watcher](#try-the-fire-topics-before-node-red-is-ready), show the demo photo, and check that it saves the preview matching the incident ID.
+5. Run `& .\.venv\Scripts\python.exe -m Test.check_incident_logger`. Expect one saved line for each synthetic drone even when the event ID repeats, including after a logger restart.
+6. Start `drone02` using the second PC setup. The same wildcard subscriber should show both drone IDs, with `DISABLED` for `drone02` and telemetry from both boards.
+7. Open a new subscriber with the gateway running. Expect retained QoS 1 status and only new telemetry. Run `& .\.venv\Scripts\python.exe -m Test.check_mqtt` to check abrupt TCP loss, retained `{"online":false}`, reconnect, fresh-only telemetry, and the clean shutdown message on isolated test topics.
+8. Run the [offline photo check](#test-the-detector-on-a-photograph) with a fire photo and a photo with no detections, using a different output name each time. Check the shared label, box, preview and JPEG settings.
+
+### Bench results
+
+- **One STM32 and one PC.** The RGB sequence was verified on the board. A live HiveMQ subscriber saw `tracker_state: IDLE` while `stream_state` was `STREAMING`. During the B1 pause it received 24 online status messages and zero telemetry messages. The GPS replay resumed at the next point. Removing the ST-LINK USB stopped telemetry while the gateway stayed online. Reconnecting produced `CALIBRATING`, followed by fresh telemetry at the next route point.
+- **Camera.** With the camera disabled, live IMU telemetry still reached HiveMQ. The Brio reported `UNAVAILABLE` when unplugged and returned to `AVAILABLE` after reconnecting. The subscriber received 31 live IMU messages during the outage. A separate run with a missing camera ID reported `UNAVAILABLE`. A live fire test delivered a matching incident and annotated JPEG with a fresh simulated observer fix. The offline image tester saved JPEG previews for both a fire photo and a photo with no detections.
+- **Broker checks with synthetic data.** HiveMQ delivered retained status to a late subscriber, retained the Last Will on a TCP interruption, and delivered only fresh test telemetry after reconnect. Both drone IDs appeared under one wildcard in a one-PC fixture. The incident checks matched the preview and skipped duplicate logger rows across restarts.
+
+Still pending are the simultaneous two-PC, two-board run and Cristian's Node-RED check.

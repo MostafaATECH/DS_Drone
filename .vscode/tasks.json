@@ -15,12 +15,14 @@
       "command": "${env:USERPROFILE}/zephyrproject/.venv/Scripts/west.exe",
       "args": [
         "build",
+        "--board",
+        "${input:board}",
         "-d",
-        "${workspaceFolder}/build",
-        "${workspaceFolder}",
+        "build/step02",
+        ".",
         "--",
-        "-DCONF_FILE=${workspaceFolder}/confs/prj_nucleo_wl55jc.conf",
-        "-DDTC_OVERLAY_FILE=${workspaceFolder}/boards/nucleo_wl55jc.overlay"
+        "-DCONF_FILE=confs/prj_nucleo_wl55jc.conf",
+        "-DDTC_OVERLAY_FILE=boards/nucleo_wl55jc.overlay"
       ],
       "options": {
         "cwd": "${workspaceFolder}",
@@ -47,11 +49,11 @@
         "--board",
         "${input:board}",
         "-d",
-        "${workspaceFolder}/build",
-        "${workspaceFolder}",
+        "build/step02",
+        ".",
         "--",
-        "-DCONF_FILE=${workspaceFolder}/confs/prj_nucleo_wl55jc.conf",
-        "-DDTC_OVERLAY_FILE=${workspaceFolder}/boards/nucleo_wl55jc.overlay"
+        "-DCONF_FILE=confs/prj_nucleo_wl55jc.conf",
+        "-DDTC_OVERLAY_FILE=boards/nucleo_wl55jc.overlay"
       ],
       "options": {
         "cwd": "${workspaceFolder}",
@@ -71,7 +73,7 @@
       "args": [
         "flash",
         "-d",
-        "${workspaceFolder}/build",
+        "build/step02",
         "--runner",
         "openocd"
       ],

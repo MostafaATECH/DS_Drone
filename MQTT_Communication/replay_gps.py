@@ -2,6 +2,7 @@
 
 import json
 from collections import deque
+from datetime import datetime
 
 
 def load_route(path):
@@ -60,9 +61,17 @@ class GpsReplay:
         if self.loop and self.cursor == len(self.positions):
             self.cursor = 0
 
-    def latest_position(self, now):
-        """Copy the freshest fix that already existed at the supplied monotonic time."""
+    def latest_position(self, now, *, timestamp=None):
+        """Copy a recent fix, also checking the UTC age when an event timestamp is given."""
+        observation_time = datetime.fromisoformat(timestamp) if timestamp is not None else None
         for fix_at, fix in reversed(self.fixes):
-            if fix_at <= now:
-                return fix.copy() if now - fix_at <= self.freshness_s else None
+            if fix_at > now:
+                continue
+            if now - fix_at > self.freshness_s:
+                break
+            if observation_time is not None:
+                age = (observation_time - datetime.fromisoformat(fix["fix_timestamp"])).total_seconds()
+                if not 0 <= age <= self.freshness_s:
+                    continue
+            return fix.copy()
         return None

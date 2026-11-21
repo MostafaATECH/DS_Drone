@@ -4,7 +4,7 @@
 
 Use `broker.hivemq.com`, TCP port `1883`, MQTT 3.1.1 and a 15-second keepalive. Leave TLS off and username and password empty for this public test endpoint. The shared root is `aerofleet-dsdrone-4f7c92`. The prefix helps keep demos separate. Anyone connected to the public broker can read or publish these topics.
 
-Use a unique client ID per connection. The gateways default to `dsdrone-4f7c92-drone01` and `dsdrone-4f7c92-drone02`. A dashboard can use `dsdrone-4f7c92-node-red`, with a different ID for each dashboard instance. The independent Python logger generates its own `dsdrone-log-…` ID.
+Use a unique client ID per connection. The gateways use `dsdrone-4f7c92-drone01` and `dsdrone-4f7c92-drone02`. In Node-RED, set the broker configuration's Client ID to `dsdrone-4f7c92-cristian-node-red`. Add a suffix if you run another instance. The independent Python logger generates its own ID beginning with `dsdrone-log-`. See the [second PC setup](../README.md#set-up-the-second-pc) for the gateway profile.
 
 The topic layout is `<root>/<drone_id>/<message_type>`. Use `+` for the drone ID when subscribing to all drones.
 
@@ -68,7 +68,7 @@ On unexpected gateway connection loss, HiveMQ can publish the retained QoS 1 Las
 
 ### Incident
 
-The current detector publishes `type: "fire"` after a confirmed episode. Confidence is between 0 and 1. A position, when present, has the same shape as the telemetry position and represents the simulated observing drone at the time of the confirming frame. The ground fire location is unknown. The camera can still confirm an incident during B1 pause or STM32 disconnection, with `position: null` when the observer fix is stale or unavailable.
+The current detector publishes `type: "fire"` after a confirmed episode. Confidence is between 0 and 1. A position, when present, has the same shape as the telemetry position and represents the simulated observing drone at the time of the confirming frame. Its `fix_timestamp` is at or before the incident timestamp and within the configured freshness limit. The ground fire location is unknown. The camera can still confirm an incident during B1 pause or STM32 disconnection, with `position: null` when the observer fix is stale or unavailable.
 
 ```json
 {
