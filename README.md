@@ -1,23 +1,42 @@
 # DS Drone
 
-Each PC represents one drone. Its STM32 reads an MPU6050 and sends measurements over USB. A Python gateway on the PC adds a simulated GPS position and publishes JSON to the MQTT broker. Cristian can subscribe to the same topics for both drones when the Node-RED dashboard is ready. The optional Logitech camera plugs into the PC and runs local inference.
+Each PC represents one drone. Its STM32 calibrates the MPU6050, handles B1 and the RGB LED, and sends IMU readings to the PC over USB. The Python gateway adds simulated GPS and publishes telemetry and status to HiveMQ. An optional Logitech camera adds local fire detection, incident metadata, and annotated JPEG previews through the same MQTT connection.
 
-The STM32 firmware calibrates the IMU, handles B1 and RGB, and sends readings over USB. The PC gateway reads those frames, adds simulated GPS, and sends telemetry and status to HiveMQ. When enabled, the camera sends confirmed fire incidents and matching JPEG previews through the same MQTT connection.
+Use the [demo guide](DEMO_GUIDE.md) for the presentation and the [MQTT handoff](MQTT_Communication/MQTT_Topics_and_Payloads.md) for Cristian's dashboard.
 
 ## Project layout
 
 | Location | Responsibility |
 | --- | --- |
 | `src/`, `Include/` | STM32 application and C headers. `imu.c` calibrates, samples, and processes the IMU. `board_io.c` handles B1 and the RGB LED. `main.c` owns the stream state and serial output. |
-| `MQTT_Communication/` | `run_gateway.py` coordinates serial, GPS, and optional camera input. `publish_mqtt.py` publishes on the shared connection. `log_incidents.py` independently subscribes and saves incident records. |
+| `MQTT_Communication/` | `read_stm32_serial.py` parses frames and reconnects. `replay_gps.py` tracks the simulated route. `run_gateway.py` combines inputs. `publish_mqtt.py` owns the MQTT connection, `camera_messages.py` prepares incident messages, and `log_incidents.py` independently saves incident records. |
 | `AI_Vision/` | `fire_detection.py` runs the shared fire detector and JPEG renderer. `camera_stream.py` owns capture and inference on a worker thread. `fire_episodes.py` confirms a local incident from successive frames. |
-| `Test/` | Focused checks, offline image tester, and local outputs. This is the existing casing on disk. |
-| `boards/`, `confs/`, `.vscode/`, `CMakeLists.txt`, `build/` | Existing Zephyr board settings, configuration, VS Code tasks, and generated build output. |
-| Project root | GPS route `upm_drone_gps_loop.json`, model weights `best.pt`, and shared `config.example.json` with per-PC overrides in `config.local.json`. |
+| `Test/` | Automated checks and command-line tests for the broker, camera, and still images. Generated files go in `Test/output/`. |
+| `boards/`, `confs/`, `.vscode/`, `CMakeLists.txt` | Zephyr board settings, compiler inputs, and VS Code build and flash tasks. Generated firmware goes in `build/`. |
+| Project root | `project_config.py` loads shared defaults from `config.example.json` and overrides from ignored `config.local.json`. The GPS replay uses `upm_drone_gps_loop.json`. Vision uses `best.pt`. |
+
+## Windows setup
+
+Open PowerShell in the root of your DS_Drone checkout. The PC gateway was tested with Python 3.12.10, pySerial 3.5 and Paho MQTT 2.1.0. Create the environment once.
+
+```powershell
+python --version
+python -m venv .venv
+$projectPython = '.\.venv\Scripts\python.exe'
+& $projectPython -m pip install -r requirements.txt
+& $projectPython -m pip check
+```
+
+| Task | Needs |
+| --- | --- |
+| Status, MQTT broker check, and incident logger | Base requirements and broker access. The gateway reports `DISCONNECTED` for an absent STM32. |
+| Live IMU and advancing simulated GPS | The STM32 running DS_Drone firmware and connected over ST-LINK USB. The camera is optional. |
+| Offline photos | Vision requirements, `best.pt`, and an image file. Runs locally. |
+| Live camera | Vision requirements, `best.pt`, and the Brio. Publishing incidents and previews also needs the broker. The observer position becomes `null` if the STM32 stops supplying fresh readings and the last simulated fix expires. |
 
 ## STM32 to PC serial contract
 
-The old STM32 project sends line-based reports, including a `$SIMU1` frame with comma-separated fields and CRLF. DS_Drone uses the same text framing with a distinct `$DS1` prefix and the fields needed for this demo. The firmware uses Zephyr's `LPUART1` console through the ST-LINK Virtual COM Port. Use **115200 baud, 8 data bits, no parity, 1 stop bit, and no flow control**. Windows currently identifies the port as **COM3**.
+The firmware sends `$DS1` frames over Zephyr's `LPUART1` console through the ST-LINK Virtual COM Port. Use **115200 baud, 8 data bits, no parity, 1 stop bit, and no flow control**. The bench board appeared as **COM3**. Check the port on your own PC.
 
 ```text
 $DS1,S,CALIBRATING
@@ -47,10 +66,12 @@ $DS1,S,ERROR
 
 The Zephyr board definition maps B1 (`sw0`) to PA0. Connect the MPU6050 (`0x68`) to 3.3 V and GND, SDA to D14/PA11, and SCL to D15/PA12. Connect the RGB common anode to 3.3 V and each cathode through its own resistor to D4/PB5 (red), D5/PB8 (green), or D6/PB10 (blue).
 
+Firmware builds use an existing Zephyr workspace with West, CMake, Ninja, a device-tree compiler and the Zephyr SDK. The bench used West 1.5.0, CMake 4.4.3, and the Zephyr SDK 1.0.1 with OpenOCD. Set the two paths below to the workspace and SDK installations on your PC. A PC with an already flashed board can use the gateway with just the Python setup above.
+
 ```powershell
-Set-Location "$env:USERPROFILE\Desktop\DS_Drone"
-$zephyrPython = "$env:USERPROFILE\zephyrproject\.venv\Scripts\python.exe"
-$env:ZEPHYR_BASE = "$env:USERPROFILE\zephyrproject\zephyr"
+$zephyrWorkspace = "$env:USERPROFILE\zephyrproject"
+$zephyrPython = Join-Path $zephyrWorkspace '.venv\Scripts\python.exe'
+$env:ZEPHYR_BASE = Join-Path $zephyrWorkspace 'zephyr'
 $env:ZEPHYR_TOOLCHAIN_VARIANT = 'zephyr'
 $env:ZEPHYR_SDK_INSTALL_DIR = "$env:USERPROFILE\Desktop\University programing\tools\zephyr-sdk-1.0.1"
 $env:PYTHONDONTWRITEBYTECODE = '1'
@@ -58,15 +79,19 @@ $env:PYTHONDONTWRITEBYTECODE = '1'
 & $zephyrPython -m west build --board nucleo_wl55jc/stm32wl55xx -d build/step02 . -- `
   '-DCONF_FILE=confs/prj_nucleo_wl55jc.conf' `
   '-DDTC_OVERLAY_FILE=boards/nucleo_wl55jc.overlay' `
-  "-DUSER_CACHE_DIR=$($PWD.Path)/.zephyr-cache"
-& $zephyrPython -m west flash -d build/step02 --runner openocd
-& $zephyrPython -m serial.tools.list_ports -v
-& $zephyrPython -m serial.tools.miniterm COM3 115200 --eol CRLF --dtr 0 --rts 0
+  "-DUSER_CACHE_DIR=$($PWD.Path.Replace('\', '/'))/.zephyr-cache"
+& $zephyrPython -m west flash --no-rebuild -d build/step02 --runner openocd --verify
 ```
 
-The VS Code West tasks use the same `build/step02` directory. Use this build for the demo because the original `build/zephyr` can still contain the template firmware.
+After a successful build, wait for OpenOCD to verify the image. The VS Code West tasks use the same `build/step02` directory.
 
-Use the ST-LINK port from the port listing if Windows assigns a different number. Place the IMU on a stable surface, open the monitor, and reset the board. Keep the IMU still until the LED turns blue.
+```powershell
+& .\.venv\Scripts\python.exe -m serial.tools.list_ports -v
+$stmPort = Read-Host 'Enter the ST-LINK COM port shown above'
+& .\.venv\Scripts\python.exe -m serial.tools.miniterm $stmPort 115200 --eol CRLF --dtr 0 --rts 0
+```
+
+Place the IMU on a stable surface, open the monitor, and reset the board. Keep the IMU still until the LED turns blue.
 
 1. Check for green with `CALIBRATING` status lines about one second apart, followed by blue, `STREAMING`, and `$DS1,M,...` measurements. A B1 press while green cannot start streaming early.
 2. Press and release B1. Look for red and `PAUSED`. Wait several seconds to confirm that status lines continue while measurement lines stop. Press B1 again and verify blue, `STREAMING`, and new readings.
@@ -75,16 +100,19 @@ Use the ST-LINK port from the port listing if Windows assigns a different number
 
 ## Run the gateway on Windows
 
-Close Miniterm or any other serial monitor first. From PowerShell, create the environment once and install or update the gateway dependencies.
+Close the serial monitor with `Ctrl+]` first. Run one gateway per board from the repository root after [setting up Python](#windows-setup).
 
-```powershell
-Set-Location "$env:USERPROFILE\Desktop\DS_Drone"
-python -m venv .venv
-& .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-& .\.venv\Scripts\python.exe -m MQTT_Communication.run_gateway
+The first PC can use `config.example.json` as shipped for `drone01`. Put any overrides in the ignored root file `config.local.json`. This example keeps the camera disabled and uses automatic ST-LINK discovery. For the second PC, start with the [drone02 example](#set-up-the-second-pc).
+
+```json
+{
+  "serial": {"port": null},
+  "mqtt": {"drone_id": "drone01", "client_id": "dsdrone-4f7c92-drone01"},
+  "camera": {"enabled": false}
+}
 ```
 
-The gateway loads `config.example.json` by default. Create `config.local.json` in the repo root to override only the settings you need. Git ignores this file. For example, `{"serial":{"port":"COM3"}}` fixes the port to COM3. Set `port` to `null` for automatic discovery. Automatic discovery requires a unique ST-LINK match (`0483:374E`) and remembers its USB serial number when available. You can set `serial.usb_serial_number` from `serial.tools.list_ports -v` to identify a particular board when several are plugged in. Relative GPS paths start at the repo root.
+With `serial.port: null`, the reader requires a unique ST-LINK match (`0483:374E`) and remembers the board's USB serial number when available. Set a specific COM port, such as `"COM3"`, if needed. Set `serial.usb_serial_number` from `serial.tools.list_ports -v` to select one board among several. Relative GPS and model paths start at the repo root.
 
 The example configuration leaves the camera off. Use `--camera off` to force this mode on a PC with only the base dependencies, or `--camera on` to enable the Brio with the [optional vision dependencies](#test-the-detector-on-a-photograph) installed.
 
@@ -215,8 +243,6 @@ Test the logger without the STM32, camera, or Node-RED by running `& .\.venv\Scr
 Install the optional vision dependencies in the project environment. The CPU wheel versions below are the pair used for the image test. [PyTorch CPU wheel instructions](https://pytorch.org/get-started/previous-versions/#v280)
 
 ```powershell
-Set-Location "C:\Users\Acer\Desktop\DS_Drone"
-python -m venv .venv  # Run once if the project environment does not exist
 $projectPython = '.\.venv\Scripts\python.exe'
 & $projectPython -m pip install torch==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cpu
 & $projectPython -m pip install -r requirements-vision.txt
@@ -225,8 +251,9 @@ $projectPython = '.\.venv\Scripts\python.exe'
 Use the project's interpreter in place of `py`, which did not find an installation on this PC. `--image` can point to a photograph outside the repository. Pick a `.jpg` or `.jpeg` output inside DS_Drone. Keep filenames in quotes if the path contains spaces.
 
 ```powershell
+$imagePath = Read-Host 'Enter the full path to your photo'
 & $projectPython .\Test\test_model_image.py `
-  --image "C:\Users\Acer\Desktop\distributed system\testfire.jpg" `
+  --image "$imagePath" `
   --model ".\best.pt" `
   --output ".\Test\output\testfire_preview.jpg"
 ```
@@ -242,15 +269,13 @@ Run the shared preview checks with `& $projectPython -m unittest discover -s Tes
 Install or update `requirements-vision.txt` using the same project interpreter as the photo test. List devices before choosing an index. The standalone check uses the DirectShow backend by default and displays each camera's device name and USB ID. [Camera enumeration reference](https://pypi.org/project/cv2-enumerate-cameras/1.4.0/)
 
 ```powershell
-Set-Location "$env:USERPROFILE\Desktop\DS_Drone"
 $projectPython = '.\.venv\Scripts\python.exe'
-& $projectPython -m pip install -r requirements-vision.txt
 & $projectPython -m Test.check_camera --list
 & $projectPython -m Test.check_camera --enable --seconds 18 --output '.\Test\output\logitech_preview.jpg'
 & $projectPython -m Test.check_camera --enable --show
 ```
 
-The Brio 100 was `046d:094c` at DirectShow index 1 on this PC. Index 0 was the laptop camera. The default `camera.source` selects the Brio by USB ID, so the worker looks up its current index again when reopening. You can choose an index explicitly using `--source 1` or a numeric `camera.source` in `config.local.json`. Keep `camera.enabled` false on the PC without a camera. `--enable` turns it on for this check. Close the local window with `Q`, `Esc`, or `Ctrl+C`. To check recovery, unplug the Brio, wait for `UNAVAILABLE`, plug it back in, and wait for `AVAILABLE`. The missing-device path can also be exercised with `--enable --source ffff:ffff --seconds 6`.
+The Brio 100 was `046d:094c` at DirectShow index 1 on this PC. Index 0 was the laptop camera. The default `camera.source` selects the Brio by USB ID, so the worker looks up its current index again when reopening. To use a different device, set `camera.source` in `config.local.json` to the listed USB ID or numeric index. `--enable` turns the camera on for the standalone check and `--source 1` overrides its device selection. Close the local window with `Q`, `Esc`, or `Ctrl+C`. To check recovery, unplug the Brio, wait for `UNAVAILABLE`, plug it back in, and wait for `AVAILABLE`. The missing-device path can also be exercised with `--enable --source ffff:ffff --seconds 6`.
 
 | State | Meaning |
 | --- | --- |
@@ -264,6 +289,16 @@ The Brio 100 was `046d:094c` at DirectShow index 1 on this PC. Index 0 was the l
 The demo uses the shared confidence threshold of 0.25 when `camera.confidence` is `null`. A number in `config.local.json` overrides it for live capture. One positive frame can show orange boxes in the preview. After three consecutive processed frames with a fire detection, the tracker creates one local incident with a stable `drone01-fire-…` ID. It rearms after two seconds of observed absence. Change `camera.confirmation_frames` or `camera.absence_s` to tune these demo choices. Camera interruptions reset an unconfirmed streak and preserve a confirmed ID while the scene is unobserved. The detector selects the checkpoint's `fire` label by name.
 
 For the local episode check, point the Brio at a screen showing the fire photograph, hold it in view, then remove it from view for at least two seconds. Watch for one `Confirmed fire` line per episode. The camera unit checks use `& $projectPython -m unittest discover -s Test -p test_camera_stream.py -v`.
+
+## Troubleshooting
+
+| Symptom | What to check |
+| --- | --- |
+| The ST-LINK COM port opens but the gateway repeatedly reports “No valid STM32 frames”. | The bench board was initially running the old template. Build and flash from `build/step02` with `--verify`. Use the ST-LINK port at 115200 baud and reset the board to look for `$DS1` lines. Close Miniterm with `Ctrl+]` before restarting the gateway. |
+| The serial reader logs `ClearCommError` just after unplugging ST-LINK. | This was the Windows serial handle closing on device removal. Leave the gateway running, reconnect the same board, and watch for calibration and streaming. |
+| CMake reports `Invalid character escape '\U'` for the devicetree overlay. | Use the documented relative `DTC_OVERLAY_FILE` from the repository root. The updated VS Code tasks already pass that path. |
+| `py` reports no installed Python. | Use `python` to create the environment and run project commands with `.\.venv\Scripts\python.exe`. |
+| The camera check shows the laptop camera, or the Brio is unavailable. | Run the listing command. Select the Brio's USB ID or its current index. After plugging the Brio back in, allow the next five-second retry. |
 
 ## Set up the second PC
 
@@ -320,4 +355,4 @@ except KeyboardInterrupt:
 - **Camera.** With the camera disabled, live IMU telemetry still reached HiveMQ. The Brio reported `UNAVAILABLE` when unplugged and returned to `AVAILABLE` after reconnecting. The subscriber received 31 live IMU messages during the outage. A separate run with a missing camera ID reported `UNAVAILABLE`. A live fire test delivered a matching incident and annotated JPEG with a fresh simulated observer fix. The offline image tester saved JPEG previews for both a fire photo and a photo with no detections.
 - **Broker checks with synthetic data.** HiveMQ delivered retained status to a late subscriber, retained the Last Will on a TCP interruption, and delivered only fresh test telemetry after reconnect. Both drone IDs appeared under one wildcard in a one-PC fixture. The incident checks matched the preview and skipped duplicate logger rows across restarts.
 
-Still pending are the simultaneous two-PC, two-board run and Cristian's Node-RED check.
+Still pending are the simultaneous two-PC, two-board run, Cristian's Node-RED check, physical IMU error behavior, and the interactive camera window. The final report, slides, and Node-RED flow documentation are separate submission work. [Demo guide](DEMO_GUIDE.md)

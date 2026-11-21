@@ -185,7 +185,7 @@ class Stm32Reader:
         return None
 
     def status(self, now):
-        """Return the board fields used by the local gateway and future MQTT status."""
+        """Return the board fields shared by the gateway console and MQTT status."""
         return {
             "stm_connected": self.stream_state != "DISCONNECTED",
             "streaming": self.fresh_measurement(now) is not None,
