@@ -10,7 +10,7 @@ The STM32 firmware calibrates the IMU, handles B1 and RGB, and sends readings ov
 | --- | --- |
 | `src/`, `Include/` | STM32 application and C headers. `imu.c` calibrates, samples, and processes the IMU. `board_io.c` handles B1 and the RGB LED. `main.c` owns the stream state and serial output. |
 | `MQTT_Communication/` | `run_gateway.py` combines the input from `read_stm32_serial.py` and `replay_gps.py`. `publish_mqtt.py` owns the MQTT connection, topic construction, and publishing. |
-| `AI_Vision/` | Optional camera capture, local detection, annotation, and JPEG encoding. The offline image test uses the same vision functions. |
+| `AI_Vision/` | `fire_detection.py` loads the checkpoint, detects fire, and renders the shared JPEG preview. The still-image tool calls this pipeline. |
 | `Test/` | Focused checks, offline image tester, and local outputs. This is the existing casing on disk. |
 | `boards/`, `confs/`, `.vscode/`, `CMakeLists.txt`, `build/` | Existing Zephyr board settings, configuration, VS Code tasks, and generated build output. |
 | Project root | GPS route `upm_drone_gps_loop.json`, model weights `best.pt`, and shared `config.example.json` with per-PC overrides in `config.local.json`. |
@@ -153,3 +153,30 @@ Test-NetConnection broker.hivemq.com -Port 1883
 ```
 
 The MQTT check verifies telemetry receipt, retained online status for a late subscriber, the Last Will after abruptly closing TCP, current status after reconnect, and explicit offline status on clean shutdown. The extra topic level keeps these fixtures outside Cristian's dashboard subscriptions. The script removes its retained test status at the end. For a bench check, watch `aerofleet-dsdrone-4f7c92/drone01/status` and `/telemetry` while pressing B1, unplugging only the STM32, and exiting the gateway with `Ctrl+C`. The deliberate TCP failure in the script is the separate Last Will check.
+
+## Test the detector on a photograph
+
+Install the optional vision dependencies in the project environment. The CPU wheel versions below are the pair used for the image test. [PyTorch CPU wheel instructions](https://pytorch.org/get-started/previous-versions/#v280)
+
+```powershell
+Set-Location "C:\Users\Acer\Desktop\DS_Drone"
+python -m venv .venv  # Run once if the project environment does not exist
+$projectPython = '.\.venv\Scripts\python.exe'
+& $projectPython -m pip install torch==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cpu
+& $projectPython -m pip install -r requirements-vision.txt
+```
+
+Use the project's interpreter in place of `py`, which did not find an installation on this PC. `--image` can point to a photograph outside the repository. Pick a `.jpg` or `.jpeg` output inside DS_Drone. Keep filenames in quotes if the path contains spaces.
+
+```powershell
+& $projectPython .\Test\test_model_image.py `
+  --image "C:\Users\Acer\Desktop\distributed system\testfire.jpg" `
+  --model ".\best.pt" `
+  --output ".\Test\output\testfire_preview.jpg"
+```
+
+For each new photograph, change `--image` and choose a new filename for `--output`. The tool prints the checkpoint's class mapping, the detected labels and confidences, and the saved path. This `best.pt` reports `0 = smoke` and `1 = fire`. It still saves a preview when it prints `No detections`. Use `--show` if you also want an OpenCV window. A photo provides one inference result. Confirming an incident requires successive live frames.
+
+`process_frame()` validates a BGR frame and runs the detector on CPU with image size 640, confidence threshold 0.25, and IoU threshold 0.45. The shared detector selects only the `fire` label from `model.names`. The renderer scales the source boxes to a preview with a longest edge of 640 pixels, preserving aspect ratio and skipping upscaling. It draws two-pixel orange boxes with the label and confidence to two decimal places. The shared encoder returns JPEG bytes at quality 60, which the still-image tool writes directly. It runs independently of the STM32, camera and MQTT gateway.
+
+Run the shared preview checks with `& $projectPython -m unittest discover -s Test -p test_vision_preview.py -v`.
