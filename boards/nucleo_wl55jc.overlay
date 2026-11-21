@@ -1,1 +1,35 @@
-/* Intentionally empty: no external pins or peripherals are configured. */
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/i2c/i2c.h>
+
+/ {
+    rgb-leds {
+        compatible = "gpio-leds";
+
+        red: red {
+            gpios = <&gpiob 5 GPIO_ACTIVE_LOW>;
+        };
+        green: green {
+            gpios = <&gpiob 8 GPIO_ACTIVE_LOW>;
+        };
+        blue: blue {
+            gpios = <&gpiob 10 GPIO_ACTIVE_LOW>;
+        };
+    };
+};
+
+&i2c2 {
+    clock-frequency = <I2C_BITRATE_STANDARD>;
+
+    mpu6050: mpu6050@68 {
+        compatible = "invensense,mpu6050";
+        reg = <0x68>;
+        accel-fs = <2>;
+        gyro-fs = <250>;
+        zephyr,deferred-init;
+    };
+};
+
+/* Keep the board's unused ADC-backed sensors from enabling ADC1. */
+&adc1 {
+    status = "disabled";
+};

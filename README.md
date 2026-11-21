@@ -2,13 +2,13 @@
 
 Each PC represents one drone. Its STM32 reads an MPU6050 and sends measurements over USB. A Python gateway on the PC adds a simulated GPS position and publishes JSON to the MQTT broker. Cristian's Node-RED dashboard subscribes to the same topics for both drones. The optional Logitech camera plugs into the PC and runs local inference.
 
-DS_Drone starts from a Zephyr template whose `main()` returns immediately. The STM32 behavior and Python components below describe the planned interfaces.
+The STM32 firmware calibrates the IMU, handles B1 and RGB, and sends readings over USB. The PC gateway, camera, and MQTT behavior below describe the planned interfaces.
 
 ## Project layout
 
 | Location | Responsibility |
 | --- | --- |
-| `src/`, `Include/` | STM32 application and C headers. Read and calibrate the IMU, maintain the stream state, handle B1 and RGB, and send serial frames. |
+| `src/`, `Include/` | STM32 application and C headers. `imu.c` calibrates, samples, and processes the IMU. `board_io.c` handles B1 and the RGB LED. `main.c` owns the stream state and serial output. |
 | `MQTT_Communication/` | One Python gateway entry point, with separate serial reading and GPS replay. The gateway owns the MQTT connection and publishes combined status. An independent incident logger subscribes to the broker. |
 | `AI_Vision/` | Optional camera capture, local detection, annotation, and JPEG encoding. The offline image test uses the same vision functions. |
 | `Test/` | Focused checks, offline image tester, and local outputs. This is the existing casing on disk. |
@@ -17,7 +17,7 @@ DS_Drone starts from a Zephyr template whose `main()` returns immediately. The S
 
 ## STM32 to PC serial contract
 
-The old STM32 project sends line-based reports, including a `$SIMU1` frame with comma-separated fields and CRLF. DS_Drone uses the same text framing with a distinct `$DS1` prefix and the fields needed for this demo. The Zephyr board devicetree selects `LPUART1` at **115200 baud**. Windows currently identifies the ST-LINK Virtual COM Port as **COM3**. Use 115200, 8 data bits, no parity, 1 stop bit, and no flow control as the proposed terminal settings. The current DS_Drone template disables the console, so receiving frames with these settings still needs an on-board check.
+The old STM32 project sends line-based reports, including a `$SIMU1` frame with comma-separated fields and CRLF. DS_Drone uses the same text framing with a distinct `$DS1` prefix and the fields needed for this demo. The firmware uses Zephyr's `LPUART1` console through the ST-LINK Virtual COM Port. Use **115200 baud, 8 data bits, no parity, 1 stop bit, and no flow control**. Windows currently identifies the port as **COM3**.
 
 ```text
 $DS1,S,CALIBRATING
@@ -37,17 +37,39 @@ $DS1,S,ERROR
 - The board sends `CALIBRATING` after boot and switches to `STREAMING` after successful calibration. Clear cached measurements when entering calibration, pause, error, or disconnection. After resume or reopen, wait for a fresh measurement. A valid `M` also establishes `STREAMING` when the PC starts listening mid-stream. Device sequence numbers and timestamps are omitted. The PC records its receipt time and uses monotonic time for freshness.
 - A serial read or device-removal error, or five seconds without any valid frame, produces `DISCONNECTED` on the PC. Clear partial input and stale samples, and retry the identified port every two seconds initially. An open COM port or debug text alone cannot establish a responsive board.
 
-### Board wiring to check
+### Firmware behavior
 
-The Zephyr board definition maps `sw0` to B1 on PA0 and I2C2 to PA11 (SDA) and PA12 (SCL). The older overlay adds the MPU6050 at `0x68` and the active-low RGB channels on PB5, PB8, and PB10. The new firmware will need those declarations in its own overlay.
+- Green covers MPU6050 initialization, one second of settling, and 250 successful gyro readings with a 10 ms delay between them. The firmware also needs a successful full IMU read before it streams. A startup failure shows red and reports `ERROR`. Reset the board after checking the wiring.
+- After calibration, the IMU worker aims for 50 readings per second. The main loop sends each new sample it sees while streaming and reports status once per second and on state changes. B1 must be stable for 40 ms to register a press. Holding B1 triggers one transition. Sampling and angle integration continue during the pause, so resuming waits only for the next new sample. The angles are kept inside the firmware.
+- Any failed read suppresses that measurement. Two seconds without a good read changes the stream state to `ERROR` and turns the LED red. If readings recover, the firmware returns to the current pause or stream setting. The tracker reports `PROBLEM` on recovered samples until it confirms stable motion or rest, then returns to `FLYING` or `IDLE`. These tracker labels describe bench motion inferred from the IMU.
 
-Confirm the MPU6050 uses 3.3 V and GND, SDA is on D14/PA11, and SCL is on D15/PA12. Confirm the RGB common anode is on 3.3 V and each cathode has its own resistor to D4/PB5 (red), D5/PB8 (green), or D6/PB10 (blue). Keep the board still at startup. Once Step 02 is ready, use VS Code's **West: Build** and **West: Flash** tasks, open the ST-LINK port with the settings above, and reset the board. Capture the startup lines and LED sequence, then press B1 twice and record the lines for each press. Expect green during calibration, blue during streaming, and red during pause or IMU error. Unplug USB to check that serial output stops, then reconnect and check the COM number and startup sequence.
+### Build, flash, and monitor on Windows
 
-To identify the COM port from the project root in PowerShell:
+The Zephyr board definition maps B1 (`sw0`) to PA0. Connect the MPU6050 (`0x68`) to 3.3 V and GND, SDA to D14/PA11, and SCL to D15/PA12. Connect the RGB common anode to 3.3 V and each cathode through its own resistor to D4/PB5 (red), D5/PB8 (green), or D6/PB10 (blue).
 
 ```powershell
-& "$env:USERPROFILE\zephyrproject\.venv\Scripts\python.exe" -m serial.tools.list_ports -v
+Set-Location "$env:USERPROFILE\Desktop\DS_Drone"
+$zephyrPython = "$env:USERPROFILE\zephyrproject\.venv\Scripts\python.exe"
+$env:ZEPHYR_BASE = "$env:USERPROFILE\zephyrproject\zephyr"
+$env:ZEPHYR_TOOLCHAIN_VARIANT = 'zephyr'
+$env:ZEPHYR_SDK_INSTALL_DIR = "$env:USERPROFILE\Desktop\University programing\tools\zephyr-sdk-1.0.1"
+$env:PYTHONDONTWRITEBYTECODE = '1'
+
+& $zephyrPython -m west build --board nucleo_wl55jc/stm32wl55xx -d build/step02 . -- `
+  '-DCONF_FILE=confs/prj_nucleo_wl55jc.conf' `
+  '-DDTC_OVERLAY_FILE=boards/nucleo_wl55jc.overlay' `
+  "-DUSER_CACHE_DIR=$($PWD.Path)/.zephyr-cache"
+& $zephyrPython -m west flash -d build/step02 --runner openocd
+& $zephyrPython -m serial.tools.list_ports -v
+& $zephyrPython -m serial.tools.miniterm COM3 115200 --eol CRLF --dtr 0 --rts 0
 ```
+
+Use the ST-LINK port from the port listing if Windows assigns a different number. Place the IMU on a stable surface, open the monitor, and reset the board. Keep the IMU still until the LED turns blue.
+
+1. Check for green with `CALIBRATING` status lines about one second apart, followed by blue, `STREAMING`, and `$DS1,M,...` measurements. A B1 press while green cannot start streaming early.
+2. Press and release B1. Look for red and `PAUSED`. Wait several seconds to confirm that status lines continue while measurement lines stop. Press B1 again and verify blue, `STREAMING`, and new readings.
+3. Reset the board and check that it starts green and calibrates again. If testing a disconnected IMU at startup, turn off power before removing or reconnecting its wires. With the sensor disconnected, expect red and regular `ERROR` status lines.
+4. Exit the monitor with `Ctrl+]` before opening the same COM port from the Python reader. If testing USB reconnection, reopen the monitor and reset the board to capture the full startup sequence.
 
 ## MQTT handoff to Node-RED
 
