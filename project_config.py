@@ -1,27 +1,22 @@
 """Read the settings shared by the gateway and local checks."""
 
 import json
+import re
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
+# Match quoted strings first so a URL or other value containing // stays intact.
+STRINGS_OR_LINE_COMMENTS = re.compile(r'("(?:\\[^\r\n]|[^"\\\r\n])*")|//[^\r\n]*')
 
 
 def load_config(root=ROOT):
-    """Load the example settings and apply the per-PC overrides by section."""
-    settings = json.loads((root / "config.example.json").read_text(encoding="utf-8-sig"))
-    override_path = root / "config.local.json"
-    if not override_path.exists():
-        return settings
-
-    overrides = json.loads(override_path.read_text(encoding="utf-8-sig"))
-    if not isinstance(overrides, dict):
-        raise ValueError("config.local.json must contain an object")
-    for section, values in overrides.items():
-        if section not in settings or not isinstance(values, dict):
-            raise ValueError(f"invalid configuration section: {section}")
-        unknown = values.keys() - settings[section].keys()
-        if unknown:
-            raise ValueError(f"unknown {section} setting: {', '.join(sorted(unknown))}")
-        settings[section].update(values)
+    """Read config.json, allowing single-line comments outside strings."""
+    contents = (root / "config.json").read_text(encoding="utf-8-sig")
+    settings = json.loads(STRINGS_OR_LINE_COMMENTS.sub(lambda match: match[1] or "", contents))
+    if not isinstance(settings, dict):
+        raise ValueError("config.json must contain a JSON object")
+    for section in ("serial", "gps", "mqtt", "camera"):
+        if not isinstance(settings.get(section), dict):
+            raise ValueError(f"config.json must contain a '{section}' object")
     return settings

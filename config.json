@@ -1,0 +1,38 @@
+{
+  "serial": {                             // USB serial connection between the PC and the STM32.
+    "port": null,                         // Auto-detect the ST-LINK COM port, or enter a port such as "COM3".
+    "usb_serial_number": null,            // Set the ST-LINK USB serial number to choose a specific board.
+    "baud_rate": 115200,                  // Serial speed in bits per second. Match the STM32 firmware.
+    "heartbeat_timeout_s": 5,             // Reconnect after 5 seconds without a valid frame from the STM32.
+    "retry_interval_s": 2,                // Wait 2 seconds before trying to connect again.
+    "measurement_freshness_s": 5         // Stop using an IMU measurement when it is more than 5 seconds old.
+  },
+  "gps": {                                // Simulated GPS positions replayed from a file.
+    "path": "upm_drone_gps_loop.json",     // Route file, relative to the repo root.
+    "freshness_s": 5                      // Use a replayed position for up to 5 seconds.
+  },
+  "mqtt": {                               // Broker connection and gateway identity.
+    "host": "broker.hivemq.com",          // Broker hostname.
+    "port": 1883,                         // TCP port the gateway connects to on the broker.
+    "keepalive_s": 5,                     // MQTT keepalive. A silent connection expires after about 7.5 seconds.
+    "topic_root": "aerofleet-dsdrone-4f7c92", // Shared topic prefix. Keep the same value on both PCs.
+    "drone_id": "drone01",                // Appears in topics such as <topic_root>/drone01/telemetry. Use "drone02" on the second PC.
+    "client_id": null,                    // null appends drone_id to "dsdrone-4f7c92-". A string sets the full broker connection ID.
+    "username": null,                     // Broker username. null connects without login credentials.
+    "password": null,                     // Broker password, used when a username is set.
+    "tls": false,                        // Set true to use TLS encryption with a compatible broker port.
+    "preview_max_bytes": 120000           // Maximum byte size of the full preview message, including the encoded image.
+  },
+  "camera": {                             // Camera capture and fire detection on the PC.
+    //"enabled": false,                     // Set true to start camera processing by default.
+    //"source": "046d:094c",                // Logitech Brio 100 USB ID. A number selects a camera by index.
+    "enabled": true,                     // Set true to start camera processing by default.
+    "source": 0,
+    "backend": "dshow",                   // Windows DirectShow. Use "msmf" for Media Foundation.
+    "model": "best.pt",                   // Fire detection model file, relative to the repo root.
+    "confidence": null,                   // null uses the detector's default confidence threshold of 0.25.
+    "confirmation_frames": 3,            // Confirm a fire incident after 3 consecutive processed frames detect fire.
+    "absence_s": 2,                       // After 2 seconds of observed absence, a detection can start a new incident.
+    "retry_s": 5                          // Wait 5 seconds before trying to reopen an unavailable camera.
+  }
+}

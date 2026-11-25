@@ -18,7 +18,6 @@ venv/
 Fast.txt
 
 # Local model weights and generated test output
-*.pt
 /[Tt]est/output/
 /[Tt]est/logs/
 /[Tt]est/*.jsonl

@@ -11,14 +11,15 @@ import paho.mqtt.client as mqtt
 
 from AI_Vision.camera_stream import CameraFrame
 from AI_Vision.fire_episodes import FireIncident
-from MQTT_Communication.camera_messages import CameraMessages
+from hardware_data_collection.collect_drone_data import ROOT, make_camera
+from hardware_data_collection.prepare_fire_reports import FireReports
+from hardware_data_collection.replay_gps_route import GpsReplay
 from MQTT_Communication.publish_mqtt import MqttPublisher
-from MQTT_Communication.replay_gps import GpsReplay
-from MQTT_Communication.run_gateway import ROOT, make_camera
+from project_config import load_config
 from Test.check_fire_mqtt import FireMatches
 
 
-SETTINGS = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8"))["mqtt"]
+SETTINGS = load_config()["mqtt"]
 STAMP = "2026-11-21T10:00:00.000Z"
 LATER_STAMP = "2026-11-21T10:00:01.000Z"
 BOARD = {"stm_connected": False, "streaming": False,
@@ -37,7 +38,7 @@ class IncidentTests(unittest.TestCase):
         replay.update(11, LATER_STAMP, active=True)
         publisher = Mock()
         publisher.publish_incident.side_effect = [False, True]
-        updates = CameraMessages(publisher, replay)
+        updates = FireReports(publisher, replay)
         updates.publish_updates(12, None, (INCIDENT,))
         updates.publish_updates(12.5, None, ())
         replay.update(13, LATER_STAMP, active=True)
@@ -57,7 +58,7 @@ class IncidentTests(unittest.TestCase):
         for gps in (None, replay):
             with self.subTest(gps=gps):
                 publisher = Mock()
-                updates = CameraMessages(publisher, gps)
+                updates = FireReports(publisher, gps)
                 updates.publish_updates(11, None, (INCIDENT,))
                 self.assertIsNone(publisher.publish_incident.call_args.args[1]["position"])
 
@@ -68,7 +69,7 @@ class IncidentTests(unittest.TestCase):
         earlier_fix = replay.latest_position(9)
         replay.update(10, "2026-11-21T10:00:00.001Z", active=True)
         publisher = Mock()
-        CameraMessages(publisher, replay).publish_updates(11, None, (INCIDENT,))
+        FireReports(publisher, replay).publish_updates(11, None, (INCIDENT,))
         self.assertEqual(publisher.publish_incident.call_args.args[1]["position"], earlier_fix)
 
     def test_disabled_camera_skips_optional_import(self):
@@ -84,10 +85,14 @@ class PublisherTests(unittest.TestCase):
         """Start a synthetic broker connection without opening a socket."""
         factory = self.enterContext(patch("MQTT_Communication.publish_mqtt.mqtt.Client"))
         self.publisher = MqttPublisher({**SETTINGS, "preview_max_bytes": 250})
-        self.publisher.connected_at = 10
         self.client = factory.return_value
         self.client.is_connected.return_value = True
         self.client.publish.return_value = SimpleNamespace(rc=mqtt.MQTT_ERR_SUCCESS)
+        self.connect(10)
+
+    def connect(self, now):
+        with patch("MQTT_Communication._publisher_runtime.time.monotonic", return_value=now):
+            self.client.on_connect(self.client, None, None, SimpleNamespace(is_failure=False), None)
 
     def test_camera_health_publishes_without_stm32(self):
         """Report camera health changes independently of measurements and STM32 connection."""
@@ -129,10 +134,10 @@ class PublisherTests(unittest.TestCase):
             # Raw JPEG is under 250 bytes. The Base64 and JSON envelope are over it.
             self.publisher.publish_preview(11.6, replace(frame, captured_monotonic=11.6, jpeg=b"x" * 180))
         self.assertIn("Skipped preview", messages.output[0])
-        self.publisher.connected_at = 15
+        self.connect(15)
         self.publisher.publish_preview(15.1, replace(frame, captured_monotonic=14.9))
         self.assertEqual(self.client.publish.call_count, 1)
-        updates = CameraMessages(self.publisher, replay=None)
+        updates = FireReports(self.publisher, replay=None)
         updates.publish_updates(15.1, None, (INCIDENT,))
         self.assertEqual(self.client.publish.call_args.args[0], self.publisher.incident_topic)
         self.assertEqual(self.client.publish.call_args.kwargs, {"qos": 1, "retain": False})

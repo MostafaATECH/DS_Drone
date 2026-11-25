@@ -10,9 +10,8 @@ from uuid import uuid4
 
 import paho.mqtt.client as mqtt
 
+from MQTT_Communication.publish_mqtt import validate_mqtt_settings
 from project_config import ROOT, load_config
-
-from .publish_mqtt import validate_mqtt_settings
 
 
 LOGGER = logging.getLogger(__name__)

@@ -7,12 +7,13 @@ import math
 import time
 from datetime import datetime, timezone
 
+from MQTT_Communication.payloads import telemetry_payload
+from MQTT_Communication.publish_mqtt import MqttPublisher, validate_mqtt_settings
 from project_config import ROOT, load_config
 
-from .camera_messages import CameraMessages
-from .publish_mqtt import MqttPublisher, validate_mqtt_settings
-from .read_stm32_serial import Stm32Reader
-from .replay_gps import GpsReplay
+from .prepare_fire_reports import FireReports
+from .read_stm32_stream import Stm32Reader
+from .replay_gps_route import GpsReplay
 
 
 TELEMETRY_INTERVAL_S = 1.0
@@ -20,7 +21,7 @@ POLL_INTERVAL_S = 0.02
 
 
 def load_settings(root):
-    """Read shared defaults and merge any per-PC JSON settings into their sections."""
+    """Load config.json and validate settings used by the gateway."""
     settings = load_config(root)
 
     for key in ("port", "usb_serial_number"):
@@ -50,13 +51,9 @@ def utc_now():
 def build_telemetry(measurement, position):
     """Assemble the agreed payload, converting the raw gyro axes from deg/s to rad/s."""
     sample = measurement.sample
-    return {
-        "timestamp": measurement.timestamp,
-        "tracker_state": sample.tracker_state,
-        "position": position,
-        "accel_m_s2": dict(zip("xyz", sample.accel_m_s2)),
-        "gyro_rad_s": dict(zip("xyz", map(math.radians, sample.gyro_deg_s))),
-    }
+    gyro_rad_s = tuple(map(math.radians, sample.gyro_deg_s))
+    return telemetry_payload(measurement.timestamp, sample.tracker_state, position,
+                             sample.accel_m_s2, gyro_rad_s)
 
 
 class Gateway:
@@ -103,6 +100,8 @@ def main(argv=None):
     """Run the gateway with optional camera capture until Ctrl+C shuts it down."""
     parser = argparse.ArgumentParser(description="Run one DS Drone gateway.")
     parser.add_argument("--camera", choices=("on", "off"), help="override camera.enabled for this run")
+    parser.add_argument("--demo-will", action="store_true",
+                        help="on Ctrl+C, leave the MQTT connection silent to demonstrate Last Will")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     try:
@@ -133,9 +132,10 @@ def main(argv=None):
     if camera_status == "DISABLED" and camera is None:
         logging.info("Camera DISABLED")
 
-    camera_messages = CameraMessages(publisher, replay) if camera is not None else None
+    fire_reports = FireReports(publisher, replay) if camera is not None else None
     previous_camera_status = None
     previous_status = None
+    interrupted = False
     try:
         publisher.start()
         if camera is not None:
@@ -156,7 +156,7 @@ def main(argv=None):
             publisher.publish_update(now, timestamp, status, telemetry, measurement_at,
                                      camera_status=camera_status)
             if camera is not None:
-                camera_messages.publish_updates(time.monotonic(), snapshot.frame, camera.take_incidents())
+                fire_reports.publish_updates(time.monotonic(), snapshot.frame, camera.take_incidents())
             local_status = {"port": reader.port_name, **status}
             if local_status != previous_status:
                 print("STM32", json.dumps(local_status), flush=True)
@@ -165,11 +165,12 @@ def main(argv=None):
                 print("Telemetry", json.dumps(telemetry), flush=True)
             time.sleep(POLL_INTERVAL_S)
     except KeyboardInterrupt:
+        interrupted = True
         print("Gateway stopped.")
     finally:
         reader.close()
         try:
-            publisher.close()
+            publisher.close(demo_will=args.demo_will and interrupted)
         finally:
             if camera is not None and not camera.stop():
                 logging.warning("Camera driver did not return before the shutdown timeout")

@@ -9,8 +9,8 @@ from uuid import uuid4
 
 import paho.mqtt.client as mqtt
 
+from hardware_data_collection.collect_drone_data import ROOT, load_settings, utc_now
 from MQTT_Communication.publish_mqtt import MqttPublisher, OFFLINE_STATUS
-from MQTT_Communication.run_gateway import ROOT, load_settings, utc_now
 
 
 TIMEOUT = 8

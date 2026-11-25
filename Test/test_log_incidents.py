@@ -9,11 +9,11 @@ from unittest.mock import Mock, patch
 
 import paho.mqtt.client as mqtt
 
-from MQTT_Communication.log_incidents import IncidentLog, OUTPUT_DIR, log_path, make_incident_client, parse_incident
-from project_config import ROOT
+from project_config import ROOT, load_config
+from tools.log_incidents import IncidentLog, OUTPUT_DIR, log_path, make_incident_client, parse_incident
 
 
-SETTINGS = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8"))["mqtt"]
+SETTINGS = load_config()["mqtt"]
 TOPIC = f"{SETTINGS['topic_root']}/drone01/incident"
 STAMP = "2026-11-21T10:00:00.000Z"
 EVENT = {"event_id": "synthetic-fire-example", "timestamp": STAMP, "type": "fire",
@@ -88,7 +88,7 @@ class IncidentLogTests(unittest.TestCase):
         IncidentLog(self.path).append(first)
         with self.path.open("ab") as log:
             log.write(b'{"broken":')
-        with self.assertLogs("MQTT_Communication.log_incidents", level="WARNING"):
+        with self.assertLogs("tools.log_incidents", level="WARNING"):
             restarted = IncidentLog(self.path)
         self.assertFalse(restarted.append(first))
         second = {**first, "event_id": "synthetic-next"}
@@ -99,12 +99,12 @@ class IncidentLogTests(unittest.TestCase):
 
     def test_callback_subscribes_and_keeps_processing(self):
         """Request QoS 1 and persist a valid incident after rejecting malformed input."""
-        with patch("MQTT_Communication.log_incidents.mqtt.Client", return_value=Mock()):
+        with patch("tools.log_incidents.mqtt.Client", return_value=Mock()):
             client = make_incident_client(SETTINGS, IncidentLog(self.path), "synthetic-logger")
         client.subscribe.return_value = (mqtt.MQTT_ERR_SUCCESS, 1)
         client.on_connect(client, None, None, SimpleNamespace(is_failure=False), None)
         client.subscribe.assert_called_once_with(f"{SETTINGS['topic_root']}/+/incident", qos=1)
-        with self.assertLogs("MQTT_Communication.log_incidents", level="WARNING") as warnings:
+        with self.assertLogs("tools.log_incidents", level="WARNING") as warnings:
             client.on_message(client, None, SimpleNamespace(topic=TOPIC, payload=b"not JSON"))
         self.assertIn("Ignored malformed incident", warnings.output[0])
         client.on_message(client, None, SimpleNamespace(topic=TOPIC, payload=json.dumps(EVENT).encode()))

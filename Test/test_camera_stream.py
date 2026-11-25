@@ -1,6 +1,5 @@
 """Check camera recovery, episode timing, and shared previews with synthetic frames."""
 
-import json
 import time
 import unittest
 from dataclasses import replace
@@ -10,7 +9,7 @@ from unittest.mock import Mock, patch
 
 from AI_Vision import camera_stream
 from AI_Vision.fire_episodes import FireEpisodeTracker
-from project_config import ROOT
+from project_config import load_config
 
 
 STAMP = "2026-11-21T10:00:00.000Z"
@@ -18,7 +17,7 @@ STAMP = "2026-11-21T10:00:00.000Z"
 
 def camera_settings(**overrides):
     """Read the shared camera defaults with a short retry for synthetic tests."""
-    values = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8"))["camera"]
+    values = load_config()["camera"]
     return camera_stream.load_camera_settings({**values, "retry_s": 0.02, **overrides})
 
 

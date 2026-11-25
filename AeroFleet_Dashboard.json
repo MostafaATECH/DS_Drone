@@ -1,0 +1,617 @@
+[
+    {
+        "id": "486ce4200d884f13",
+        "type": "tab",
+        "label": "AeroFleet - Control Room",
+        "disabled": false,
+        "info": "Dashboard visual AeroFleet alimentada por MQTT."
+    },
+    {
+        "id": "596b05056b4f4163",
+        "type": "mqtt in",
+        "z": "486ce4200d884f13",
+        "name": "All drone telemetry",
+        "topic": "aerofleet-dsdrone-4f7c92/+/telemetry",
+        "qos": "0",
+        "datatype": "auto",
+        "broker": "e164d37192f64c99",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 450,
+        "y": 340,
+        "wires": [
+            [
+                "24495df079d049af"
+            ]
+        ]
+    },
+    {
+        "id": "839715c74f9648f6",
+        "type": "mqtt in",
+        "z": "486ce4200d884f13",
+        "name": "All drone status",
+        "topic": "aerofleet-dsdrone-4f7c92/+/status",
+        "qos": "1",
+        "datatype": "auto",
+        "broker": "e164d37192f64c99",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 450,
+        "y": 400,
+        "wires": [
+            [
+                "24495df079d049af"
+            ]
+        ]
+    },
+    {
+        "id": "9a7ff9efc1384dd7",
+        "type": "mqtt in",
+        "z": "486ce4200d884f13",
+        "name": "All drone incident",
+        "topic": "aerofleet-dsdrone-4f7c92/+/incident",
+        "qos": "0",
+        "datatype": "auto",
+        "broker": "e164d37192f64c99",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 450,
+        "y": 460,
+        "wires": [
+            [
+                "24495df079d049af"
+            ]
+        ]
+    },
+    {
+        "id": "31fb7884905b4935",
+        "type": "mqtt in",
+        "z": "486ce4200d884f13",
+        "name": "All drone preview",
+        "topic": "aerofleet-dsdrone-4f7c92/+/preview",
+        "qos": "0",
+        "datatype": "auto",
+        "broker": "e164d37192f64c99",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 450,
+        "y": 520,
+        "wires": [
+            [
+                "24495df079d049af"
+            ]
+        ]
+    },
+    {
+        "id": "24495df079d049af",
+        "type": "function",
+        "z": "486ce4200d884f13",
+        "name": "Aggregate fleet data",
+        "func": "// AeroFleet fleet aggregator\n// Accepts: aerofleet/<droneId>/<messageType>\n\n// Dashboard command: clear current incidents and remember their IDs.\n// Remembering cleared IDs prevents retained/replayed MQTT messages from restoring them.\nif (msg.topic === \"aerofleet/control/clear-incidents\") {\n    const fleet = flow.get(\"aerofleet_dashboard_fleet\") || {};\n    const currentIncidents = flow.get(\"aerofleet_dashboard_incidents\") || [];\n    const clearedIds = new Set(flow.get(\"aerofleet_dashboard_cleared_incident_ids\") || []);\n\n    // Mark every currently known incident as cleared, including per-drone cached incidents.\n    currentIncidents.forEach(incident => {\n        if (incident && incident.event_id) clearedIds.add(String(incident.event_id));\n    });\n\n    Object.values(fleet).forEach(drone => {\n        if (drone && drone.incident && drone.incident.event_id) {\n            clearedIds.add(String(drone.incident.event_id));\n        }\n        if (drone && typeof drone === \"object\") drone.incident = null;\n    });\n\n    // Keep a bounded tombstone list so old retained MQTT events cannot reappear.\n    const clearedIdList = Array.from(clearedIds).slice(-500);\n    flow.set(\"aerofleet_dashboard_cleared_incident_ids\", clearedIdList);\n    flow.set(\"aerofleet_dashboard_incidents\", []);\n    flow.set(\"aerofleet_dashboard_incidents_initialized\", true);\n    flow.set(\"aerofleet_dashboard_fleet\", fleet);\n\n    const history = flow.get(\"aerofleet_dashboard_history\") || [];\n    const onlineCount = Object.values(fleet).filter(drone =>\n        drone.status && drone.status.online === true\n    ).length;\n\n    msg.payload = {\n        fleet: Object.values(fleet),\n        onlineCount: onlineCount,\n        incidentCount: 0,\n        incidents: [],\n        history: history,\n        updatedAt: new Date().toISOString()\n    };\n\n    return msg;\n}\n\n// Also accepts the HiveMQ prefix: aerofleet-dsdrone-4f7c92/<droneId>/<messageType>\n\nconst parts = (msg.topic || \"\").split(\"/\");\nif (parts.length !== 3) return null;\n\nconst topicRoot = parts[0];\nconst droneId = parts[1];\nconst type = parts[2];\n\nconst acceptedRoots = [\"aerofleet\", \"aerofleet-dsdrone-4f7c92\"];\nif (!acceptedRoots.includes(topicRoot)) return null;\nif (!droneId || ![\"telemetry\", \"status\", \"incident\", \"preview\"].includes(type)) return null;\n\n// Convert JSON strings into objects. Preview can also arrive as a raw base64 string.\nlet payload = msg.payload;\nif (typeof payload === \"string\") {\n    try {\n        payload = JSON.parse(payload);\n    } catch (err) {\n        if (type === \"preview\") payload = { image_base64: payload };\n        else {\n            node.warn(\"Invalid JSON on \" + msg.topic);\n            return null;\n        }\n    }\n}\nif (payload === null || payload === undefined || typeof payload !== \"object\") return null;\n\nconst receivedAt = new Date().toISOString();\n\nconst fleet = flow.get(\"aerofleet_dashboard_fleet\") || {};\nif (!fleet[droneId]) {\n    fleet[droneId] = {\n        id: droneId,\n        telemetry: {},\n        status: {},\n        incident: null,\n        preview: null\n    };\n}\n\nconst drone = fleet[droneId];\nif (type === \"status\" && (payload.online !== true || payload.stm_connected === false || payload.streaming === false)) {\n    delete drone.speedFix;\n}\nif (type === \"telemetry\") {\n    const fix = payload.position;\n    const time = Date.parse(fix && fix.fix_timestamp);\n    const previous = drone.speedFix;\n    if (fix && fix.source === \"simulated\" && Number.isFinite(time) &&\n        Number.isFinite(fix.latitude) && Math.abs(fix.latitude) <= 90 &&\n        Number.isFinite(fix.longitude) && Math.abs(fix.longitude) <= 180) {\n        if (!previous || time > previous.time) {\n            let speed = null;\n            if (previous && time - previous.time <= 5000) {\n                const rad = Math.PI / 180;\n                const dLat = (fix.latitude - previous.latitude) * rad;\n                const dLon = (fix.longitude - previous.longitude) * rad;\n                const a = Math.sin(dLat / 2) ** 2 +\n                    Math.cos(previous.latitude * rad) * Math.cos(fix.latitude * rad) * Math.sin(dLon / 2) ** 2;\n                const distance = 2 * 6371000 * Math.asin(Math.min(1, Math.sqrt(a)));\n                speed = distance / ((time - previous.time) / 1000);\n            }\n            drone.speedFix = { time, latitude: fix.latitude, longitude: fix.longitude, speed };\n        }\n    } else {\n        delete drone.speedFix;\n    }\n}\n\nif (type === \"incident\") {\n    // Keep a separate event list: one drone can report multiple incidents over time.\n    let incidents = flow.get(\"aerofleet_dashboard_incidents\");\n\n    // Migrate legacy per-drone incidents only before the user has explicitly cleared the list.\n    const incidentsInitialized = flow.get(\"aerofleet_dashboard_incidents_initialized\") === true;\n    if (!Array.isArray(incidents)) {\n        if (incidentsInitialized) {\n            incidents = [];\n        } else {\n            incidents = Object.values(fleet)\n                .filter(drone => drone.incident && typeof drone.incident === \"object\")\n                .map(drone => ({\n                    ...drone.incident,\n                    droneId: drone.id,\n                    timestamp: drone.incident.timestamp || drone.lastSeen || receivedAt,\n                    receivedAt: drone.incident.receivedAt || drone.lastSeen || receivedAt\n                }));\n        }\n    }\n\n    const incidentTimestamp = payload.timestamp || receivedAt;\n    const eventId = String(payload.event_id || (droneId + \"-\" + (payload.type || \"incident\") + \"-\" + incidentTimestamp));\n    const clearedIds = flow.get(\"aerofleet_dashboard_cleared_incident_ids\") || [];\n\n    // Ignore old retained/replayed messages whose event IDs were cleared by the user.\n    if (clearedIds.includes(eventId)) {\n        const currentIncidents = flow.get(\"aerofleet_dashboard_incidents\") || [];\n        const currentHistory = flow.get(\"aerofleet_dashboard_history\") || [];\n        const currentFleet = flow.get(\"aerofleet_dashboard_fleet\") || fleet;\n        const currentOnlineCount = Object.values(currentFleet).filter(drone =>\n            drone.status && drone.status.online === true\n        ).length;\n\n        msg.payload = {\n            fleet: Object.values(currentFleet),\n            onlineCount: currentOnlineCount,\n            incidentCount: currentIncidents.filter(incident =>\n                [\"fire\", \"smoke\"].includes(String(incident.type || \"\").toLowerCase())\n            ).length,\n            incidents: currentIncidents,\n            history: currentHistory,\n            updatedAt: receivedAt\n        };\n        return msg;\n    }\n\n    const normalizedIncident = {\n        ...payload,\n        event_id: eventId,\n        droneId: droneId,\n        timestamp: incidentTimestamp,\n        receivedAt: receivedAt\n    };\n\n    // Update an existing event with the same ID; otherwise append a new event.\n    const existingIndex = incidents.findIndex(item => item.event_id === eventId);\n    if (existingIndex >= 0) incidents[existingIndex] = normalizedIncident;\n    else incidents.push(normalizedIncident);\n\n    const toTime = item => {\n        const parsed = Date.parse((item && (item.timestamp || item.receivedAt)) || \"\");\n        return Number.isFinite(parsed) ? parsed : 0;\n    };\n\n    incidents.sort((a, b) => toTime(b) - toTime(a));\n    if (incidents.length > 200) incidents.length = 200;\n\n    flow.set(\"aerofleet_dashboard_incidents\", incidents);\n    flow.set(\"aerofleet_dashboard_incidents_initialized\", true);\n\n    // Preserve the latest incident on the individual drone record for the fleet view.\n    fleet[droneId].incident = normalizedIncident;\n} else {\n    fleet[droneId][type] = payload;\n}\n\nfleet[droneId].lastSeen = receivedAt;\nflow.set(\"aerofleet_dashboard_fleet\", fleet);\n\n// Bounded History view. Camera image data is deliberately not stored.\nconst history = flow.get(\"aerofleet_dashboard_history\") || [];\nconst historyTimestamp = payload.timestamp || receivedAt;\nlet summary = \"\";\n\nif (type === \"telemetry\") {\n    summary = \"Telemetry update · \" + (payload.tracker_state || payload.state || \"state unknown\");\n} else if (type === \"status\") {\n    summary = payload.online === true ? \"Drone online\" + (payload.stream_state ? \" · \" + payload.stream_state : \"\") : \"Drone offline\";\n} else if (type === \"incident\") {\n    summary = (payload.type || \"Incident\") + \" detected\";\n} else if (type === \"preview\") {\n    summary = \"Camera preview received\";\n}\n\nhistory.push({\n    timestamp: historyTimestamp,\n    receivedAt: receivedAt,\n    droneId: droneId,\n    type: type,\n    summary: summary\n});\n\nconst toHistoryTime = item => {\n    const parsed = Date.parse((item && (item.timestamp || item.receivedAt)) || \"\");\n    return Number.isFinite(parsed) ? parsed : 0;\n};\n\nhistory.sort((a, b) => toHistoryTime(b) - toHistoryTime(a));\nif (history.length > 250) history.length = 250;\nflow.set(\"aerofleet_dashboard_history\", history);\n\nconst incidents = flow.get(\"aerofleet_dashboard_incidents\") || [];\n\nconst onlineCount = Object.values(fleet).filter(drone =>\n    drone.status && drone.status.online === true\n).length;\n\nconst incidentCount = incidents.filter(incident =>\n    [\"fire\", \"smoke\"].includes(String(incident.type || \"\").toLowerCase())\n).length;\n\nmsg.payload = {\n    fleet: Object.values(fleet),\n    onlineCount: onlineCount,\n    incidentCount: incidentCount,\n    incidents: incidents,\n    history: history,\n    updatedAt: receivedAt\n};\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 840,
+        "y": 620,
+        "wires": [
+            [
+                "e03e45699d304841"
+            ]
+        ]
+    },
+    {
+        "id": "3dd5f836600e4cdd",
+        "type": "inject",
+        "z": "486ce4200d884f13",
+        "name": "TEST drone01 telemetry",
+        "props": [
+            {
+                "p": "topic",
+                "vt": "str"
+            },
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "aerofleet-dsdrone-4f7c92/drone01/telemetry",
+        "payload": "{\"timestamp\":\"2026-11-21T10:00:00Z\",\"tracker_state\":\"FLYING\",\"position\":{\"latitude\":40.4168,\"longitude\":-3.7038,\"altitude\":120.8,\"source\":\"simulated\",\"fix_timestamp\":\"2026-11-21T10:00:00Z\"},\"speed_m_s\":12.4,\"altitude_m\":120.8,\"satellites\":15,\"battery_percent\":87,\"accel_m_s2\":{\"x\":0.12,\"y\":-0.04,\"z\":9.81},\"gyro_rad_s\":{\"x\":0.01,\"y\":0.02,\"z\":-0.01},\"orientation\":{\"roll\":0.6,\"pitch\":-1.2,\"yaw\":184.3}}",
+        "payloadType": "json",
+        "x": 440,
+        "y": 595,
+        "wires": [
+            [
+                "24495df079d049af"
+            ]
+        ]
+    },
+    {
+        "id": "78c28177a7e24f66",
+        "type": "inject",
+        "z": "486ce4200d884f13",
+        "name": "TEST drone02 telemetry",
+        "props": [
+            {
+                "p": "topic",
+                "vt": "str"
+            },
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "aerofleet-dsdrone-4f7c92/drone02/telemetry",
+        "payload": "{\"timestamp\":\"2026-11-21T10:00:02Z\",\"tracker_state\":\"HOVERING\",\"position\":{\"latitude\":40.4201,\"longitude\":-3.7102,\"altitude\":95.3,\"source\":\"simulated\",\"fix_timestamp\":\"2026-11-21T10:00:02Z\"},\"speed_m_s\":2.1,\"altitude_m\":95.3,\"satellites\":13,\"battery_percent\":64,\"accel_m_s2\":{\"x\":0.03,\"y\":0.01,\"z\":9.79},\"gyro_rad_s\":{\"x\":0.0,\"y\":-0.01,\"z\":0.02},\"orientation\":{\"roll\":0.2,\"pitch\":0.1,\"yaw\":92.0}}",
+        "payloadType": "json",
+        "x": 440,
+        "y": 650,
+        "wires": [
+            [
+                "24495df079d049af"
+            ]
+        ]
+    },
+    {
+        "id": "8f31b5f398f142a5",
+        "type": "inject",
+        "z": "486ce4200d884f13",
+        "name": "TEST drone03 telemetry",
+        "props": [
+            {
+                "p": "topic",
+                "vt": "str"
+            },
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "aerofleet-dsdrone-4f7c92/drone03/telemetry",
+        "payload": "{\"timestamp\":\"2026-11-21T10:00:04Z\",\"tracker_state\":\"IDLE\",\"position\":{\"latitude\":40.4127,\"longitude\":-3.6951,\"altitude\":0.0,\"source\":\"simulated\",\"fix_timestamp\":\"2026-11-21T10:00:04Z\"},\"speed_m_s\":0.0,\"altitude_m\":0.0,\"satellites\":11,\"battery_percent\":98,\"accel_m_s2\":{\"x\":0.0,\"y\":0.0,\"z\":9.8},\"gyro_rad_s\":{\"x\":0.0,\"y\":0.0,\"z\":0.0},\"orientation\":{\"roll\":0.0,\"pitch\":0.0,\"yaw\":0.0}}",
+        "payloadType": "json",
+        "x": 440,
+        "y": 705,
+        "wires": [
+            [
+                "24495df079d049af"
+            ]
+        ]
+    },
+    {
+        "id": "8fcbea2ce4304d7e",
+        "type": "inject",
+        "z": "486ce4200d884f13",
+        "name": "TEST drone01 status",
+        "props": [
+            {
+                "p": "topic",
+                "vt": "str"
+            },
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "aerofleet-dsdrone-4f7c92/drone01/status",
+        "payload": "{\"online\":true}",
+        "payloadType": "json",
+        "x": 440,
+        "y": 760,
+        "wires": [
+            [
+                "24495df079d049af"
+            ]
+        ]
+    },
+    {
+        "id": "59b7f94b33b5437c",
+        "type": "inject",
+        "z": "486ce4200d884f13",
+        "name": "TEST drone02 status",
+        "props": [
+            {
+                "p": "topic",
+                "vt": "str"
+            },
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "aerofleet-dsdrone-4f7c92/drone02/status",
+        "payload": "{\"online\":true}",
+        "payloadType": "json",
+        "x": 440,
+        "y": 815,
+        "wires": [
+            [
+                "24495df079d049af"
+            ]
+        ]
+    },
+    {
+        "id": "da2beb9361794ef7",
+        "type": "inject",
+        "z": "486ce4200d884f13",
+        "name": "TEST drone03 status",
+        "props": [
+            {
+                "p": "topic",
+                "vt": "str"
+            },
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "aerofleet-dsdrone-4f7c92/drone03/status",
+        "payload": "{\"online\":false}",
+        "payloadType": "json",
+        "x": 440,
+        "y": 870,
+        "wires": [
+            [
+                "24495df079d049af"
+            ]
+        ]
+    },
+    {
+        "id": "c60dc217cf294e7f",
+        "type": "inject",
+        "z": "486ce4200d884f13",
+        "name": "TEST fire incident",
+        "props": [
+            {
+                "p": "topic",
+                "vt": "str"
+            },
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "aerofleet-dsdrone-4f7c92/drone01/incident",
+        "payload": "{\"event_id\":\"drone02-fire-010\",\"timestamp\":\"2026-12-22T10:00:05Z\",\"type\":\"fire\",\"confidence\":0.70,\"position\":{\"latitude\":40.4172,\"longitude\":-3.7041}}",
+        "payloadType": "json",
+        "x": 430,
+        "y": 940,
+        "wires": [
+            [
+                "24495df079d049af"
+            ]
+        ]
+    },
+    {
+        "id": "1942d526356b4e69",
+        "type": "inject",
+        "z": "486ce4200d884f13",
+        "name": "TEST camera preview",
+        "props": [
+            {
+                "p": "topic",
+                "vt": "str"
+            },
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "aerofleet-dsdrone-4f7c92/drone01/preview",
+        "payload": "{\"event_id\":\"drone01-fire-001\",\"timestamp\":\"2026-11-21T10:00:06Z\",\"image_base64\":\"\"}",
+        "payloadType": "json",
+        "x": 440,
+        "y": 1060,
+        "wires": [
+            [
+                "24495df079d049af"
+            ]
+        ]
+    },
+    {
+        "id": "f08e18f57dc9bd0d",
+        "type": "function",
+        "z": "486ce4200d884f13",
+        "name": "Clear Incidents Handler",
+        "func": "\nif (msg.topic !== \"aerofleet/control/clear-incidents\") {\n    return null;\n}\n\nconst fleet = flow.get(\"aerofleet_dashboard_fleet\") || {};\nconst incidents = flow.get(\"aerofleet_dashboard_incidents\") || [];\n\nconst clearedIds = new Set(\n    flow.get(\"aerofleet_dashboard_cleared_incident_ids\") || []\n);\n\n// Remember all deleted incident IDs.\nincidents.forEach(incident => {\n    if (incident.event_id) {\n        clearedIds.add(String(incident.event_id));\n    }\n});\n\n// Clear the incident cache of every drone.\nObject.values(fleet).forEach(drone => {\n    if (drone.incident && drone.incident.event_id) {\n        clearedIds.add(String(drone.incident.event_id));\n    }\n\n    drone.incident = null;\n});\n\n// Save cleared IDs and empty incident list.\nflow.set(\n    \"aerofleet_dashboard_cleared_incident_ids\",\n    Array.from(clearedIds).slice(-500)\n);\n\nflow.set(\"aerofleet_dashboard_incidents\", []);\nflow.set(\"aerofleet_dashboard_incidents_initialized\", true);\nflow.set(\"aerofleet_dashboard_fleet\", fleet);\n\nconst history = flow.get(\"aerofleet_dashboard_history\") || [];\n\nconst onlineCount = Object.values(fleet).filter(\n    drone => drone.status && drone.status.online === true\n).length;\n\n// Send the updated dashboard data directly to the UI.\nmsg.topic = \"aerofleet/dashboard/cleared\";\n\nmsg.payload = {\n    fleet: Object.values(fleet),\n    onlineCount: onlineCount,\n    incidentCount: 0,\n    incidents: [],\n    history: history,\n    updatedAt: new Date().toISOString()\n};\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1450,
+        "y": 620,
+        "wires": [
+            [
+                "e03e45699d304841"
+            ]
+        ]
+    },
+    {
+        "id": "30be8c918650e2eb",
+        "type": "inject",
+        "z": "486ce4200d884f13",
+        "name": "TEST fire incident 2",
+        "props": [
+            {
+                "p": "topic",
+                "vt": "str"
+            },
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "aerofleet-dsdrone-4f7c92/drone01/incident",
+        "payload": "{\"event_id\":\"drone02-fire-036\",\"timestamp\":\"2026-12-22T10:00:05Z\",\"type\":\"fire\",\"confidence\":0.70,\"position\":{\"latitude\":40.4172,\"longitude\":-3.7041}}",
+        "payloadType": "json",
+        "x": 430,
+        "y": 1000,
+        "wires": [
+            [
+                "24495df079d049af"
+            ]
+        ]
+    },
+    {
+        "id": "aerofleet-live-sim-inject",
+        "type": "inject",
+        "z": "486ce4200d884f13",
+        "name": "Simulate drones (manual tick)",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": "0.1",
+        "topic": "aerofleet/simulator/tick",
+        "payload": "",
+        "payloadType": "date",
+        "x": 290,
+        "y": 1160,
+        "wires": [
+            [
+                "aerofleet-live-sim-function"
+            ]
+        ]
+    },
+    {
+        "id": "aerofleet-live-sim-function",
+        "type": "function",
+        "z": "486ce4200d884f13",
+        "name": "Generate 3 live drones",
+        "func": "// AeroFleet live telemetry simulator\n// Emits 3 moving drones every second, status every 5 seconds,\n// and one new incident every 20 seconds.\n// Connect this node's output to the existing \"Aggregate fleet data\" node.\n\nconst drones = [\n    { id: \"sim01\", lat: 40.41680, lon: -3.70380, phase: 0.0, altitude: 120 },\n    { id: \"sim02\", lat: 40.41810, lon: -3.70090, phase: 2.1, altitude: 86 },\n    { id: \"sim03\", lat: 40.41490, lon: -3.70620, phase: 4.2, altitude: 104 }\n];\n\nlet tick = context.get(\"simTick\") || 0;\ntick += 1;\ncontext.set(\"simTick\", tick);\n\nconst now = new Date();\nconst timestamp = now.toISOString();\nconst messages = [];\n\ndrones.forEach((drone, index) => {\n    // Small, smooth movement around each drone's starting GPS coordinate.\n    const angle = (tick * 0.12) + drone.phase;\n    const latitude = drone.lat + (Math.sin(angle) * 0.00018);\n    const longitude = drone.lon + (Math.cos(angle) * 0.00022);\n\n    const speed = 2.4 + (Math.sin(angle * 0.7) * 1.1);\n    const altitude = drone.altitude + (Math.sin(angle * 0.45) * 4);\n    const battery = Math.max(15, 96 - Math.floor(tick / 18) - index * 3);\n\n    messages.push({\n        topic: \"aerofleet/\" + drone.id + \"/telemetry\",\n        payload: {\n            timestamp: timestamp,\n            tracker_state: speed > 1.2 ? \"FLYING\" : \"HOVERING\",\n            position: {\n                latitude: Number(latitude.toFixed(6)),\n                longitude: Number(longitude.toFixed(6)),\n                altitude: Number(altitude.toFixed(1)),\n                source: \"simulated\",\n                fix_timestamp: timestamp\n            },\n            speed_m_s: Number(speed.toFixed(2)),\n            satellites: 12 + ((tick + index) % 5),\n            battery_percent: battery,\n            accel_m_s2: {\n                x: Number((Math.sin(angle) * 0.35).toFixed(2)),\n                y: Number((Math.cos(angle) * 0.28).toFixed(2)),\n                z: Number((9.81 + Math.sin(angle * 0.5) * 0.12).toFixed(2))\n            },\n            gyro_rad_s: {\n                x: Number((Math.sin(angle * 0.8) * 0.04).toFixed(3)),\n                y: Number((Math.cos(angle * 0.6) * 0.04).toFixed(3)),\n                z: Number((Math.sin(angle * 0.4) * 0.06).toFixed(3))\n            }\n        }\n    });\n\n    // Refresh online status every five seconds.\n    if (tick % 5 === 0) {\n        messages.push({\n            topic: \"aerofleet/\" + drone.id + \"/status\",\n            payload: {\n                online: true,\n                timestamp: timestamp\n            }\n        });\n    }\n});\n\n// Create a fresh incident every 20 seconds, rotating between the three drones.\n// IDs are unique, so the incident list can demonstrate chronological updates.\nif (tick % 20 === 0) {\n    const incidentDrone = drones[Math.floor(tick / 20 - 1) % drones.length];\n    messages.push({\n        topic: \"aerofleet/\" + incidentDrone.id + \"/incident\",\n        payload: {\n            event_id: \"sim-\" + incidentDrone.id + \"-event-\" + tick,\n            timestamp: timestamp,\n            type: \"fire\",\n            confidence: Number((0.82 + ((tick % 7) * 0.02)).toFixed(2)),\n            position: {\n                latitude: incidentDrone.lat,\n                longitude: incidentDrone.lon\n            }\n        }\n    });\n}\n\n// One Function output; return several MQTT-shaped messages on that output.\nreturn [messages];",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 580,
+        "y": 1160,
+        "wires": [
+            [
+                "24495df079d049af"
+            ]
+        ]
+    },
+    {
+        "id": "e03e45699d304841",
+        "type": "ui-template",
+        "z": "486ce4200d884f13",
+        "group": "a610532da85a4946",
+        "page": "",
+        "ui": "",
+        "name": "AeroFleet Control Room UI",
+        "order": 1,
+        "width": "12",
+        "height": "22",
+        "head": "",
+        "format": "<template>\n  <div class=\"af-shell\">\n    <aside class=\"af-sidebar\">\n      <div class=\"af-brand\">\n        <div class=\"af-brand-icon\">✣</div>\n        <div><div class=\"af-brand-name\">AeroFleet</div><div class=\"af-brand-sub\">Distributed Drone Monitoring</div></div>\n      </div>\n      <nav class=\"af-nav\">\n        <button type=\"button\" class=\"af-nav-item\" :class=\"{active: activeView === 'monitor'}\" @click=\"activeView = 'monitor'\"><span>▦</span> Monitor</button>\n        <button type=\"button\" class=\"af-nav-item\" :class=\"{active: activeView === 'incidents'}\" @click=\"activeView = 'incidents'\"><span>△</span> Incidents <b v-if=\"filteredIncidents.length\" class=\"af-nav-count\">{{ filteredIncidents.length }}</b></button>\n        <button type=\"button\" class=\"af-nav-item\" :class=\"{active: activeView === 'history'}\" @click=\"activeView = 'history'\"><span>◷</span> History</button>\n        <button type=\"button\" class=\"af-nav-item\" :class=\"{active: activeView === 'fleet'}\" @click=\"activeView = 'fleet'\"><span>✣</span> Fleet</button>\n        <button type=\"button\" class=\"af-nav-item\" :class=\"{active: activeView === 'settings'}\" @click=\"activeView = 'settings'\"><span>⚙</span> Settings</button>\n      </nav>\n      <div class=\"af-connection\"><i v-if=\"onlineCount\"></i><span>MQTT data stream</span><b>{{ onlineCount ? 'LIVE' : 'IDLE' }}</b></div>\n    </aside>\n\n    <main class=\"af-main\">\n      <div v-if=\"activeView === 'monitor'\" class=\"af-view af-monitor-view\">\n      <header class=\"af-top\">\n        <div><div class=\"af-eyebrow\">AEROFLEET / OPERATIONS</div><h1>Fleet Monitor</h1><p>Real-time telemetry and fire detection</p></div>\n        <div class=\"af-kpis\">\n          <div class=\"af-kpi\"><span class=\"af-kpi-icon green\">✣</span><div><strong>{{ onlineCount }}</strong><small>Drones online</small></div></div>\n          <div class=\"af-kpi\"><span class=\"af-kpi-icon red\">△</span><div><strong>{{ incidentCount }}</strong><small>Active incidents</small></div></div>\n          <div class=\"af-kpi\"><span class=\"af-kpi-icon blue\">◉</span><div><strong>{{ fleet.length }}</strong><small>Known drones</small></div></div>\n          <div class=\"af-clock\"><small>LAST DATA UPDATE</small><strong>{{ clockLabel }}</strong><span>UTC</span></div>\n        </div>\n      </header>\n\n      <section class=\"af-toolbar\">\n        <div class=\"af-select-wrap\">\n          <label>SELECT DRONE</label>\n          <select v-model=\"selectedId\" :disabled=\"fleet.length === 0\">\n            <option v-if=\"fleet.length === 0\" value=\"\">Waiting for drones…</option>\n            <option v-for=\"d in fleet\" :key=\"d.id\" :value=\"d.id\">{{ d.id }}</option>\n          </select>\n        </div>\n        <div class=\"af-selected\" v-if=\"selected\">\n          <span class=\"af-drone-symbol\">✣</span>\n          <div><strong>{{ selected.id }}</strong><small>Selected aircraft</small></div>\n          <span class=\"af-pill\" :class=\"isOnline(selected) ? 'pill-green' : 'pill-muted'\"><i></i>{{ isOnline(selected) ? 'ONLINE' : 'OFFLINE' }}</span>\n        </div>\n        <div class=\"af-toolbar-note\"><span class=\"af-live-dot\"></span> Live fleet feed</div>\n      </section>\n\n      <section class=\"af-summary\" v-if=\"selected\">\n        <div class=\"af-summary-drone\"><span class=\"af-big-drone\">✣</span><div><strong>{{ selected.id }}</strong><span class=\"af-state\" :class=\"stateClass\">{{ trackerState }}</span><small>Last telemetry: {{ telemetryTime }}</small></div></div>\n        <div class=\"af-summary-stat\"><span>↗</span><div><strong>{{ metric(speed, 'm/s', 'N/A') }}</strong><small>{{ position.source === 'simulated' ? 'Speed (sim.)' : 'Speed' }}</small></div></div>\n        <div class=\"af-summary-stat\"><span>⇧</span><div><strong title=\"Altitude is not included in the simulated GPS route\">{{ metric(altitude, 'm', 'N/A') }}</strong><small>Altitude</small></div></div>\n        <div class=\"af-summary-stat\"><span>⌖</span><div><strong title=\"The simulated route has no satellite receiver\">{{ satellites }}</strong><small>Satellites</small></div></div>\n        <div class=\"af-summary-stat\"><span>▰</span><div><strong>{{ streamLabel(selected) }}</strong><small>STM32 stream</small></div></div>\n      </section>\n\n      <section class=\"af-grid\" v-if=\"selected\">\n        <article class=\"af-card af-map-card\">\n          <div class=\"af-card-head\">\n            <div><span class=\"af-card-icon\">⌖</span><strong>Flight location</strong></div>\n            <div class=\"af-map-head-actions\">\n              <span class=\"af-card-tag\">GPS POSITION</span>\n              <button type=\"button\" class=\"af-map-center-button\" @click=\"centerOnSelectedDrone\" :disabled=\"!hasValidMapPosition\" title=\"Center map on selected drone\">⌖ <span>Center on drone</span></button>\n            </div>\n          </div>\n          <div class=\"af-map\">\n            <div ref=\"fleetMap\" class=\"af-leaflet-map\" role=\"application\" aria-label=\"Live map showing drone locations\"></div>\n            <div class=\"af-map-coord\">{{ hasValidCoordinates(selected) ? coordinate(latitude) + ' / ' + coordinate(longitude) : 'WAITING FOR GPS' }}</div>\n            <div v-if=\"!hasValidMapPosition\" class=\"af-map-no-fix\">Waiting for valid GPS coordinates</div>\n          </div>\n          <div class=\"af-map-footer\"><span><i class=\"legend-dot green-dot\"></i> Selected drone</span><span><i class=\"legend-dot grey-dot\"></i> Other aircraft</span><span>Source: {{ positionSource }}</span><span>© OpenStreetMap</span></div>\n        </article>\n\n        <article class=\"af-card\">\n          <div class=\"af-card-head\"><div><span class=\"af-card-icon\">⌖</span><strong>Position (GPS)</strong></div><span class=\"af-card-tag\">LOCATION</span></div>\n          <div class=\"af-data-list\">\n            <div><span>Latitude</span><b>{{ coordinate(latitude) }}</b></div>\n            <div><span>Longitude</span><b>{{ coordinate(longitude) }}</b></div>\n            <div><span>Altitude</span><b>{{ metric(altitude, 'm', 'N/A') }}</b></div>\n            <div><span>Source</span><b class=\"af-source\">{{ positionSource }}</b></div>\n            <div><span>Fix timestamp</span><b class=\"af-small-value\">{{ fixTimestamp }}</b></div>\n          </div>\n        </article>\n\n        <article class=\"af-card\">\n          <div class=\"af-card-head\"><div><span class=\"af-card-icon\">⌁</span><strong>Acceleration</strong><small class=\"af-spark-window\">LAST 120 SAMPLES</small></div><span class=\"af-card-tag\">m/s²</span></div>\n          <div class=\"af-axis-list\">\n            <div><b>X</b><strong>{{ number(accel.x) }}</strong><svg class=\"af-spark green-spark\" viewBox=\"0 0 240 36\" preserveAspectRatio=\"none\" aria-hidden=\"true\"><polyline :points=\"sparklinePoints('accel_m_s2', 'x')\" /></svg></div>\n            <div><b>Y</b><strong>{{ number(accel.y) }}</strong><svg class=\"af-spark blue-spark\" viewBox=\"0 0 240 36\" preserveAspectRatio=\"none\" aria-hidden=\"true\"><polyline :points=\"sparklinePoints('accel_m_s2', 'y')\" /></svg></div>\n            <div><b>Z</b><strong>{{ number(accel.z) }}</strong><svg class=\"af-spark amber-spark\" viewBox=\"0 0 240 36\" preserveAspectRatio=\"none\" aria-hidden=\"true\"><polyline :points=\"sparklinePoints('accel_m_s2', 'z')\" /></svg></div>\n          </div>\n        </article>\n\n        <article class=\"af-card\">\n          <div class=\"af-card-head\"><div><span class=\"af-card-icon\">◌</span><strong>Gyroscope</strong><small class=\"af-spark-window\">LAST 120 SAMPLES</small></div><span class=\"af-card-tag\">rad/s</span></div>\n          <div class=\"af-axis-list\">\n            <div><b>X</b><strong>{{ number(gyro.x) }}</strong><svg class=\"af-spark green-spark\" viewBox=\"0 0 240 36\" preserveAspectRatio=\"none\" aria-hidden=\"true\"><polyline :points=\"sparklinePoints('gyro_rad_s', 'x')\" /></svg></div>\n            <div><b>Y</b><strong>{{ number(gyro.y) }}</strong><svg class=\"af-spark blue-spark\" viewBox=\"0 0 240 36\" preserveAspectRatio=\"none\" aria-hidden=\"true\"><polyline :points=\"sparklinePoints('gyro_rad_s', 'y')\" /></svg></div>\n            <div><b>Z</b><strong>{{ number(gyro.z) }}</strong><svg class=\"af-spark amber-spark\" viewBox=\"0 0 240 36\" preserveAspectRatio=\"none\" aria-hidden=\"true\"><polyline :points=\"sparklinePoints('gyro_rad_s', 'z')\" /></svg></div>\n          </div>\n        </article>\n\n        <article class=\"af-card af-incident-card\">\n          <div class=\"af-card-head\"><div><span class=\"af-card-icon red-icon\">△</span><strong>Recent incidents</strong></div><span class=\"af-card-tag\">{{ incidents.length }} EVENTS</span></div>\n          <div v-if=\"incidents.length\" class=\"af-incident-list\">\n            <div class=\"af-incident-row\" v-for=\"(incident, idx) in sortedIncidents.slice(0,4)\" :key=\"incident.event_id || idx\">\n              <span class=\"af-fire-tag\">FIRE</span><strong>{{ incident.event_id || incident.type || 'Incident' }}</strong><span>{{ incident.droneId }}</span><b>{{ confidence(incident.confidence) }}</b><small>{{ incident.timestamp || incident.receivedAt || '—' }}</small>\n            </div>\n          </div>\n          <div v-else class=\"af-empty\">No incidents received</div>\n        </article>\n\n        <article class=\"af-card af-preview-card\">\n          <div class=\"af-card-head\"><div><span class=\"af-card-icon\">▣</span><strong>Camera preview</strong></div><span class=\"af-card-tag\">LATEST FRAME</span></div>\n          <div class=\"af-preview\">\n            <img v-if=\"previewSrc\" :src=\"previewSrc\" alt=\"Latest drone camera preview\"/>\n            <div v-else class=\"af-preview-empty\"><span>▣</span><strong>Waiting for camera frame</strong><small>Topic: aerofleet/{{ selected.id }}/preview</small></div>\n          </div>\n        </article>\n      </section>\n      <section class=\"af-empty-state\" v-else><div class=\"af-empty-icon\">✣</div><h2>Waiting for drone telemetry</h2><p>Publish a message to <code>aerofleet/drone01/telemetry</code> to populate the fleet monitor.</p></section>\n      <footer class=\"af-footer\"><span>AEROFLEET MONITORING SYSTEM</span><span>MQTT · REAL-TIME TELEMETRY · FIRE DETECTION</span></footer>\n      </div>\n\n      <section v-else-if=\"activeView === 'incidents'\" class=\"af-view af-secondary-view\">\n        <div class=\"af-page-heading\">\n          <div><div class=\"af-eyebrow\">AEROFLEET / EVENTS</div><h1>Incident Center</h1><p>Fire and event detections received from the fleet</p></div>\n          <div class=\"af-page-actions\">\n            <button type=\"button\" class=\"af-clear-button\" @click=\"clearIncidents\" :disabled=\"incidents.length === 0\">Clear incidents</button>\n            <div class=\"af-page-stat\"><strong>{{ filteredIncidents.length }}</strong><small>Visible incidents</small></div>\n          </div>\n        </div>\n        <div class=\"af-toolbar af-filterbar\"><label>CONFIDENCE THRESHOLD <strong>{{ Math.round(confidenceThreshold * 100) }}%</strong></label><input type=\"range\" min=\"0\" max=\"1\" step=\"0.05\" v-model.number=\"confidenceThreshold\"></div>\n        <div v-if=\"filteredIncidents.length\" class=\"af-secondary-list\">\n          <article v-for=\"(incident, idx) in filteredIncidents\" :key=\"incident.event_id || idx\" class=\"af-secondary-card af-incident-detail\">\n            <div class=\"af-incident-badge\">!</div><div class=\"af-secondary-content\">\n              <div class=\"af-secondary-title\"><strong>{{ incident.event_id || incident.type || 'Incident' }}</strong><span class=\"af-fire-tag\">{{ (incident.type || 'EVENT').toUpperCase() }}</span></div>\n              <p>Drone: <b>{{ incident.droneId }}</b> · Confidence: <b>{{ confidence(incident.confidence) }}</b></p><small>{{ incident.timestamp || incident.receivedAt || 'Timestamp unavailable' }}</small>\n            </div>\n          </article>\n        </div>\n        <div v-else class=\"af-empty-panel\"><span>✓</span><strong>No incidents match the current filter</strong><small>Lower the confidence threshold or wait for a new incident.</small></div>\n      </section>\n\n      <section v-else-if=\"activeView === 'history'\" class=\"af-view af-secondary-view\">\n        <div class=\"af-page-heading\"><div><div class=\"af-eyebrow\">AEROFLEET / ACTIVITY LOG</div><h1>Flight History</h1><p>Recent telemetry, status, incident and camera events</p></div><div class=\"af-page-stat\"><strong>{{ history.length }}</strong><small>Stored events</small></div></div>\n        <div class=\"af-toolbar af-filterbar\"><label>DRONE</label><select v-model=\"historyDroneFilter\"><option value=\"all\">All drones</option><option v-for=\"d in fleet\" :key=\"d.id\" :value=\"d.id\">{{ d.id }}</option></select><button type=\"button\" class=\"af-action-button\" @click=\"historyDroneFilter = 'all'\">Clear filter</button></div>\n        <div v-if=\"filteredHistory.length\" class=\"af-history-list\">\n          <div v-for=\"(event, idx) in filteredHistory\" :key=\"event.receivedAt + idx\" class=\"af-history-row\">\n            <span class=\"af-history-dot\" :class=\"'event-' + event.type\"></span><div><strong>{{ event.summary }}</strong><small>{{ event.droneId }} · {{ event.type }}</small></div><time>{{ formatTime(event.timestamp) }}</time>\n          </div>\n        </div>\n        <div v-else class=\"af-empty-panel\"><span>◷</span><strong>No history yet</strong><small>History starts recording when a message reaches Aggregate fleet data.</small></div>\n      </section>\n\n      <section v-else-if=\"activeView === 'fleet'\" class=\"af-view af-secondary-view\">\n        <div class=\"af-page-heading\"><div><div class=\"af-eyebrow\">AEROFLEET / AIRCRAFT</div><h1>Fleet Overview</h1><p>Current status of every discovered drone</p></div><div class=\"af-page-stat\"><strong>{{ fleet.length }}</strong><small>Known drones</small></div></div>\n        <div class=\"af-toolbar af-filterbar\"><label><input type=\"checkbox\" v-model=\"showOffline\"> Show offline drones</label></div>\n        <div v-if=\"visibleFleet.length\" class=\"af-fleet-grid\">\n          <button type=\"button\" v-for=\"d in visibleFleet\" :key=\"d.id\" class=\"af-fleet-card\" @click=\"selectedId = d.id; activeView = 'monitor'\">\n            <div class=\"af-fleet-card-top\"><span class=\"af-big-drone\">✣</span><span class=\"af-pill\" :class=\"isOnline(d) ? 'pill-green' : 'pill-muted'\"><i></i>{{ isOnline(d) ? 'ONLINE' : 'OFFLINE' }}</span></div>\n            <strong>{{ d.id }}</strong><span class=\"af-fleet-state\">{{ (d.telemetry && (d.telemetry.tracker_state || d.telemetry.state)) || 'UNKNOWN' }}</span>\n            <div class=\"af-fleet-metrics\"><span>Altitude <b>{{ metric(altitudeFor(d), 'm', 'N/A') }}</b></span><span>STM32 <b>{{ streamLabel(d) }}</b></span></div>\n            <small>Last message: {{ formatTime(d.lastSeen) }}</small>\n          </button>\n        </div>\n        <div v-else class=\"af-empty-panel\"><span>✣</span><strong>No drones to display</strong><small>Publish telemetry or status messages to discover aircraft.</small></div>\n      </section>\n\n      <section v-else-if=\"activeView === 'settings'\" class=\"af-view af-secondary-view\">\n        <div class=\"af-page-heading\"><div><div class=\"af-eyebrow\">AEROFLEET / PREFERENCES</div><h1>Settings</h1><p>Dashboard display and incident filtering preferences</p></div></div>\n        <div class=\"af-settings-grid\">\n          <article class=\"af-secondary-card\"><h3>Incident display</h3><p>Only show incidents at or above this confidence value.</p><label class=\"af-setting-control\"><span>Minimum confidence</span><b>{{ Math.round(confidenceThreshold * 100) }}%</b></label><input type=\"range\" min=\"0\" max=\"1\" step=\"0.05\" v-model.number=\"confidenceThreshold\"></article>\n          <article class=\"af-secondary-card\"><h3>Fleet display</h3><p>Choose whether disconnected aircraft appear in the Fleet section.</p><label class=\"af-setting-toggle\"><input type=\"checkbox\" v-model=\"showOffline\"><span>Show offline drones</span></label></article>\n          <article class=\"af-secondary-card\"><h3>Data connection</h3><p>MQTT topics are consumed by Node-RED and forwarded to this dashboard.</p><div class=\"af-connection-status\"><i></i> Listening for fleet messages</div><small>Broker configuration remains in the MQTT nodes.</small></article>\n        </div>\n      </section>\n    </main>\n  </div>\n</template>\n\n<script>\nexport default {\n  mounted() {\n    this.loadLeaflet()\n      .then(() => this.$nextTick(() => this.initFleetMap()))\n      .catch(error => console.error('[AeroFleet] Leaflet could not be loaded:', error));\n  },\n  beforeUnmount() {\n    if (this._afLeafletMap) {\n      this._afLeafletMap.remove();\n      this._afLeafletMap = null;\n      this._afLeafletMarkers = null;\n    }\n  },\n  data() {\n    return {\n      fleet: [],\n      incidents: [],\n      history: [],\n      activeView: 'monitor',\n      confidenceThreshold: 0.0,\n      showOffline: true,\n      historyDroneFilter: 'all',\n      onlineCount: 0,\n      incidentCount: 0,\n      selectedId: '',\n      updatedAt: '',\n      axisHistory: {},\n      lastTelemetrySample: {}\n    }\n  },\n  watch: {\n    msg: {\n      handler(newMsg) {\n        if (!newMsg || !newMsg.payload || !Array.isArray(newMsg.payload.fleet)) return;\n        const previous = this.selectedId;\n        this.recordAxisSamples(newMsg.payload.fleet);\n        this.fleet = newMsg.payload.fleet;\n        this.incidents = newMsg.payload.incidents || [];\n        this.history = newMsg.payload.history || this.history;\n        this.onlineCount = newMsg.payload.onlineCount || 0;\n        this.incidentCount = newMsg.payload.incidentCount || 0;\n        this.updatedAt = newMsg.payload.updatedAt || '';\n        if (previous && this.fleet.some(d => d.id === previous)) this.selectedId = previous;\n        else if (this.fleet.length) this.selectedId = this.fleet[0].id;\n        this.$nextTick(() => {\n          if (this.activeView === 'monitor') this.initFleetMap();\n          this.updateFleetMap();\n        });\n      },\n      deep: true\n    },\n    selectedId() {\n      this.$nextTick(() => {\n        this.updateFleetMap();\n        this.centerOnSelectedDrone();\n      });\n    },\n    activeView(newView) {\n      if (newView === 'monitor') {\n        this.$nextTick(() => {\n          this.initFleetMap();\n          this.updateFleetMap();\n          this.centerOnSelectedDrone();\n        });\n      } else if (this._afLeafletMap) {\n        this._afLeafletMap.remove();\n        this._afLeafletMap = null;\n        this._afLeafletMarkers = null;\n      }\n    }\n  },\n  computed: {\n    selected() { return this.fleet.find(d => d.id === this.selectedId) || null },\n    sortedIncidents() {\n      const toTime = value => {\n        const parsed = Date.parse(value || '');\n        return Number.isFinite(parsed) ? parsed : 0;\n      };\n      return [...this.incidents].sort((a, b) =>\n        toTime(b.timestamp || b.receivedAt) - toTime(a.timestamp || a.receivedAt)\n      );\n    },\n    filteredIncidents() {\n      return this.sortedIncidents.filter(i =>\n        i.confidence == null || Number(i.confidence) >= this.confidenceThreshold\n      );\n    },\n    filteredHistory() { return this.historyDroneFilter === 'all' ? this.history : this.history.filter(e => e.droneId === this.historyDroneFilter); },\n    visibleFleet() { return this.showOffline ? this.fleet : this.fleet.filter(d => this.isOnline(d)); },\n    t() { return (this.selected && this.selected.telemetry) || {} },\n    position() { return this.t.position || {} },\n    accel() { return this.t.accel_m_s2 || {} },\n    gyro() { return this.t.gyro_rad_s || {} },\n    latitude() { return this.position.latitude },\n    longitude() { return this.position.longitude },\n    hasValidMapPosition() { return this.fleet.some(d => this.hasValidCoordinates(d)) },\n    altitude() { return this.altitudeFor(this.selected) },\n    speed() {\n      const status = (this.selected && this.selected.status) || {};\n      if (status.online !== true || status.stm_connected === false || status.streaming === false) return null;\n      return this.t.speed_m_s ?? this.t.speed ?? this.t.velocity_m_s ?? this.selected?.speedFix?.speed;\n    },\n    satellites() { return this.t.satellites ?? this.t.sat ?? 'N/A' },\n    positionSource() { return this.position.source || '—' },\n    fixTimestamp() { return this.position.fix_timestamp || '—' },\n    trackerState() { return this.t.tracker_state || this.t.state || 'UNKNOWN' },\n    telemetryTime() { return this.t.timestamp || '—' },\n    stateClass() { return this.trackerState === 'FLYING' ? 'state-flying' : 'state-other' },\n    previewSrc() {\n      const p = this.selected && this.selected.preview;\n      if (!p) return '';\n      let raw = p.image_base64 || p.base64 || p.image || '';\n      if (typeof raw !== 'string') return '';\n      if (raw.startsWith('data:image/')) return raw;\n      return raw ? 'data:image/jpeg;base64,' + raw : '';\n    },\n    clockLabel() { return this.updatedAt ? this.updatedAt.replace('T',' ').replace('Z','') : 'Waiting for data' }\n  },\n  methods: {\n    recordAxisSamples(fleet) {\n      if (!Array.isArray(fleet)) return;\n\n      fleet.forEach(drone => {\n        if (!drone || !drone.id || !drone.telemetry) return;\n\n        const telemetry = drone.telemetry;\n        const sampleId = telemetry.timestamp || (telemetry.position && telemetry.position.fix_timestamp) || '';\n        if (!sampleId || this.lastTelemetrySample[drone.id] === sampleId) return;\n\n        this.lastTelemetrySample[drone.id] = sampleId;\n\n        if (!this.axisHistory[drone.id]) {\n          this.axisHistory[drone.id] = {\n            accel_m_s2: { x: [], y: [], z: [] },\n            gyro_rad_s: { x: [], y: [], z: [] }\n          };\n        }\n\n        ['accel_m_s2', 'gyro_rad_s'].forEach(sensorName => {\n          const sensor = telemetry[sensorName] || {};\n          ['x', 'y', 'z'].forEach(axis => {\n            const value = Number(sensor[axis]);\n            if (!Number.isFinite(value)) return;\n\n            const samples = this.axisHistory[drone.id][sensorName][axis];\n            samples.push(value);\n            if (samples.length > 120) samples.shift();\n          });\n        });\n      });\n    },\n\n    sparklinePoints(sensorName, axis) {\n      const droneHistory = this.axisHistory[this.selectedId];\n      const samples = droneHistory && droneHistory[sensorName]\n        ? droneHistory[sensorName][axis] || []\n        : [];\n\n      if (samples.length < 2) return '2,18 238,18';\n\n      const min = Math.min(...samples);\n      const max = Math.max(...samples);\n      const range = max - min || 1;\n\n      return samples.map((value, index) => {\n        const x = 2 + (index / (samples.length - 1)) * 236;\n        const y = 32 - ((value - min) / range) * 28;\n        return x.toFixed(1) + ',' + y.toFixed(1);\n      }).join(' ');\n    },\n\n    loadLeaflet() {\n      if (window.L) return Promise.resolve(window.L);\n      if (window.__aeroFleetLeafletPromise) return window.__aeroFleetLeafletPromise;\n\n      const cssId = 'aerofleet-leaflet-css';\n      if (!document.getElementById(cssId)) {\n        const link = document.createElement('link');\n        link.id = cssId;\n        link.rel = 'stylesheet';\n        link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';\n        document.head.appendChild(link);\n      }\n\n      window.__aeroFleetLeafletPromise = new Promise((resolve, reject) => {\n        const script = document.createElement('script');\n        script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';\n        script.onload = () => window.L ? resolve(window.L) : reject(new Error('Leaflet loaded without window.L'));\n        script.onerror = () => reject(new Error('Could not download Leaflet from unpkg.com'));\n        document.head.appendChild(script);\n      });\n      return window.__aeroFleetLeafletPromise;\n    },\n    hasValidCoordinates(drone) {\n      const p = drone && drone.telemetry && drone.telemetry.position;\n      if (!p) return false;\n      const lat = Number(p.latitude);\n      const lon = Number(p.longitude);\n      return Number.isFinite(lat) && Number.isFinite(lon) &&\n        lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180 &&\n        p.latitude !== null && p.longitude !== null &&\n        p.latitude !== '' && p.longitude !== '';\n    },\n    initFleetMap() {\n      const el = this.$refs.fleetMap;\n      if (!el || !window.L) return;\n\n      if (this._afLeafletMap && this._afLeafletMap.getContainer() !== el) {\n        this._afLeafletMap.remove();\n        this._afLeafletMap = null;\n      }\n      if (!this._afLeafletMap) {\n        this._afLeafletMap = window.L.map(el, {\n          zoomControl: true,\n          scrollWheelZoom: true\n        }).setView([40.4168, -3.7038], 12);\n\n        window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {\n          maxZoom: 19,\n          attribution: '&copy; <a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\" rel=\"noopener\">OpenStreetMap</a> contributors'\n        }).addTo(this._afLeafletMap);\n\n        this._afLeafletMarkers = window.L.layerGroup().addTo(this._afLeafletMap);\n      }\n\n      this._afLeafletMap.invalidateSize();\n      this.updateFleetMap();\n    },\n    centerOnSelectedDrone() {\n      const map = this._afLeafletMap;\n      if (!map || !this.hasValidCoordinates(this.selected)) return;\n\n      const p = this.selected.telemetry.position;\n      map.flyTo(\n        [Number(p.latitude), Number(p.longitude)],\n        Math.max(map.getZoom(), 15),\n        { animate: true, duration: 0.8 }\n      );\n    },\n    clearIncidents() {\n      if (!this.incidents.length) return;\n\n      const confirmed = window.confirm(\n        'Clear all stored incidents? This cannot be undone.'\n      );\n      if (!confirmed) return;\n\n      // Ask Node-RED to clear the server-side incident store.\n      this.send({\n        topic: 'aerofleet/control/clear-incidents',\n        payload: {\n          action: 'clear-incidents',\n          requestedAt: new Date().toISOString()\n        }\n      });\n\n      // Clear this browser immediately; the aggregator sends the authoritative empty list back.\n      this.incidents = [];\n      this.incidentCount = 0;\n    },\n    updateFleetMap() {\n      const map = this._afLeafletMap;\n      if (!map || !window.L || !this._afLeafletMarkers) return;\n\n      this._afLeafletMarkers.clearLayers();\n      const points = this.fleet.filter(d => this.hasValidCoordinates(d));\n\n      points.forEach(drone => {\n        const p = drone.telemetry.position;\n        const isSelected = drone.id === this.selectedId;\n        const marker = window.L.circleMarker([Number(p.latitude), Number(p.longitude)], {\n          radius: isSelected ? 10 : 7,\n          color: isSelected ? '#b8ffe0' : '#d3deeb',\n          weight: isSelected ? 3 : 2,\n          fillColor: isSelected ? '#13bd83' : '#6686a8',\n          fillOpacity: 0.95\n        });\n        marker.bindTooltip(String(drone.id), {\n          permanent: isSelected,\n          direction: 'top',\n          offset: [0, -8],\n          className: isSelected ? 'af-leaflet-tooltip af-leaflet-tooltip-selected' : 'af-leaflet-tooltip'\n        });\n        marker.bindPopup(\n          '<strong>' + String(drone.id).replace(/[&<>\"]/g, '') + '</strong><br>' +\n          Number(p.latitude).toFixed(5) + ', ' + Number(p.longitude).toFixed(5)\n        );\n        marker.addTo(this._afLeafletMarkers);\n      });\n\n      // Keep the user's current map view while MQTT positions refresh.\n      // Re-centering is performed only on selection change or button click.\n      this.$nextTick(() => map.invalidateSize());\n    },\n    isOnline(d) { return !!(d.status && d.status.online === true) },\n    number(v) { return v === undefined || v === null ? '—' : Number(v).toFixed(2) },\n    coordinate(v) { return v === undefined || v === null ? '—' : Number(v).toFixed(5) + '°' },\n    streamLabel(d) {\n      const status = (d && d.status) || {};\n      if (status.online === false) return 'OFFLINE';\n      if (status.stm_connected === false) return 'DISCONNECTED';\n      if (status.stream_state === 'STREAMING' && status.streaming === false) return 'WAITING';\n      return status.stream_state || 'N/A';\n    },\n    altitudeFor(d) {\n      const telemetry = (d && d.telemetry) || {};\n      return telemetry.position?.altitude ?? telemetry.altitude_m ?? telemetry.altitude;\n    },\n    metric(v, unit, missing = '—') { return v === undefined || v === null ? missing : Number(v).toFixed(1) + ' ' + unit },\n    confidence(v) { return v === undefined || v === null ? '—' : Math.round(Number(v) * 100) + '%' },\n    formatTime(v) { return v ? String(v).replace('T', ' ').replace('Z', ' UTC') : '—' }\n  }\n}\n</script>\n",
+        "noerr": 0,
+        "storeOutMessages": true,
+        "passthru": true,
+        "resendOnRefresh": true,
+        "templateScope": "local",
+        "className": "aerofleet-control-room",
+        "x": 1140,
+        "y": 620,
+        "wires": [
+            [
+                "f08e18f57dc9bd0d"
+            ]
+        ]
+    },
+    {
+        "id": "a50a6fb185824102",
+        "type": "ui-template",
+        "z": "486ce4200d884f13",
+        "group": "",
+        "page": "44b33d72c6664272",
+        "ui": "",
+        "name": "AeroFleet CSS - Single Page",
+        "order": 0,
+        "width": 0,
+        "height": 0,
+        "head": "",
+        "format": ".af-shell {\n    display:flex;\n    height:calc(100vh - 64px);\n    min-height:0;\n    max-height:calc(100vh - 64px);\n    background:#08111e;\n    color:#e8f0fb;\n    font-family:Inter,ui-sans-serif,system-ui,-apple-system,\"Segoe UI\",sans-serif;\n    border:1px solid #1d3048;\n    border-radius:16px;\n    overflow:hidden\n}\n.af-sidebar {\n    width:190px;\n    flex:0 0 190px;\n    background:#0b1727;\n    border-right:1px solid #1c3048;\n    display:flex;\n    flex-direction:column;\n    padding:24px 14px 18px;\n    box-sizing:border-box\n}\n.af-brand {\n    display:flex;\n    align-items:center;\n    gap:12px;\n    padding:0 8px 30px;\n    border-bottom:1px solid #1d3048\n}\n.af-brand-icon {\n    font-size:36px;\n    color:#4ca9ff;\n    line-height:1\n}\n.af-brand-name {\n    font-size:22px;\n    font-weight:800;\n    letter-spacing:-.5px\n}\n.af-brand-sub {\n    font-size:10px;\n    color:#8194ad;\n    margin-top:3px\n}\n.af-nav {\n    display:grid;\n    gap:8px;\n    margin-top:28px\n}\n.af-nav-item {\n    width:100%;\n    border:0;\n    background:transparent;\n    text-align:left;\n    cursor:pointer;\n    font:inherit;\n    position:relative;\n    display:flex;\n    align-items:center;\n    gap:14px;\n    padding:13px 14px;\n    color:#a9bad0;\n    border-radius:9px;\n    font-size:14px\n}\n.af-nav-item span {\n    font-size:20px;\n    width:22px;\n    text-align:center;\n    color:#8eadd1\n}\n.af-nav-item.active {\n    background:#17365b;\n    color:#fff;\n    box-shadow:inset 3px 0 #3a9dff\n}\n.af-nav-item.active span {\n    color:#56adff\n}\n.af-connection {\n    margin-top:auto;\n    border-top:1px solid #1d3048;\n    padding:18px 8px 0;\n    display:flex;\n    align-items:center;\n    gap:8px;\n    font-size:11px;\n    color:#9aadc5\n}\n.af-connection i,.af-live-dot {\n    width:8px;\n    height:8px;\n    border-radius:50%;\n    background:#22d68a;\n    box-shadow:0 0 10px #22d68a;\n    display:inline-block\n}\n.af-connection b {\n    margin-left:auto;\n    color:#26d995;\n    font-size:9px;\n    letter-spacing:1px\n}\n.af-main {\n    flex:1;\n    min-width:0;\n    min-height:0;\n    height:100%;\n    overflow:hidden;\n    display:flex;\n    flex-direction:column;\n    padding:12px 16px 8px;\n    background:radial-gradient(ellipse at 70% 0%,#13243a 0%,#091321 45%,#08111e 100%);\n    box-sizing:border-box\n}\n.af-top {\n    display:flex;\n    justify-content:space-between;\n    align-items:center;\n    gap:18px;\n    padding-bottom:20px;\n    border-bottom:1px solid #1c3048\n}\n.af-eyebrow {\n    font-size:9px;\n    letter-spacing:2px;\n    color:#61aef4;\n    font-weight:700\n}\n.af-top h1 {\n    font-size:27px;\n    line-height:1.2;\n    margin:5px 0 3px;\n    color:#f4f8ff;\n    font-weight:750\n}\n.af-top p {\n    font-size:12px;\n    color:#91a4bd;\n    margin:0\n}\n.af-kpis {\n    display:flex;\n    gap:9px;\n    align-items:stretch\n}\n.af-kpi,.af-clock {\n    display:flex;\n    align-items:center;\n    gap:10px;\n    padding:10px 13px;\n    background:#101f32;\n    border:1px solid #263b55;\n    border-radius:10px;\n    min-width:112px\n}\n.af-kpi-icon {\n    font-size:22px\n}\n.green {\n    color:#28d98c\n}\n.red {\n    color:#ff6574\n}\n.blue {\n    color:#64b5ff\n}\n.af-kpi strong {\n    display:block;\n    font-size:18px;\n    line-height:1.1\n}\n.af-kpi small {\n    display:block;\n    font-size:9px;\n    color:#9eafc5;\n    margin-top:3px\n}\n.af-clock {\n    display:block;\n    min-width:110px\n}\n.af-clock small,.af-clock span {\n    display:block;\n    color:#8194ad;\n    font-size:8px;\n    letter-spacing:1px\n}\n.af-clock strong {\n    display:block;\n    font-size:12px;\n    margin:5px 0 2px\n}\n.af-clock span {\n    font-size:9px\n}\n.af-toolbar {\n    display:flex;\n    align-items:end;\n    gap:20px;\n    padding:15px 0 12px\n}\n.af-select-wrap {\n    width:210px\n}\n.af-select-wrap label {\n    display:block;\n    color:#9aadc5;\n    font-size:9px;\n    letter-spacing:1.4px;\n    margin-bottom:6px\n}\n.af-select-wrap select {\n    width:100%;\n    background:#12243a;\n    color:#eff6ff;\n    border:1px solid #357fc0;\n    border-radius:8px;\n    padding:10px 12px;\n    font-size:13px;\n    outline:none\n}\n.af-selected {\n    display:flex;\n    align-items:center;\n    gap:10px;\n    padding-bottom:3px\n}\n.af-drone-symbol {\n    font-size:24px;\n    color:#57adff\n}\n.af-selected strong {\n    display:block;\n    font-size:13px\n}\n.af-selected small {\n    display:block;\n    color:#8499b4;\n    font-size:9px;\n    margin-top:2px\n}\n.af-pill {\n    margin-left:8px;\n    font-size:9px;\n    letter-spacing:.6px;\n    padding:5px 8px;\n    border-radius:20px;\n    display:flex;\n    align-items:center;\n    gap:6px\n}\n.af-pill i {\n    width:6px;\n    height:6px;\n    border-radius:50%;\n    background:currentColor\n}\n.pill-green {\n    color:#29dc92;\n    background:#10372e\n}\n.pill-muted {\n    color:#a2afc1;\n    background:#29384a\n}\n.af-toolbar-note {\n    margin-left:auto;\n    color:#7e94ae;\n    font-size:10px;\n    padding-bottom:8px;\n    display:flex;\n    align-items:center;\n    gap:7px\n}\n.af-summary {\n    display:flex;\n    align-items:center;\n    background:#101e30;\n    border:1px solid #263b55;\n    border-radius:11px;\n    padding:13px 16px;\n    margin-bottom:14px;\n    gap:0\n}\n.af-summary-drone {\n    display:flex;\n    align-items:center;\n    gap:12px;\n    min-width:220px;\n    flex:1\n}\n.af-big-drone {\n    font-size:31px;\n    color:#d7e8fb\n}\n.af-summary-drone strong {\n    font-size:16px;\n    margin-right:9px\n}\n.af-summary-drone small {\n    display:block;\n    color:#8fa3bc;\n    font-size:9px;\n    margin-top:4px\n}\n.af-state {\n    font-size:9px;\n    padding:4px 7px;\n    border-radius:5px;\n    font-weight:800\n}\n.state-flying {\n    background:#145b3e;\n    color:#4ef0a3\n}\n.state-other {\n    background:#35455b;\n    color:#d3dfed\n}\n.af-summary-stat {\n    display:flex;\n    align-items:center;\n    gap:9px;\n    padding:0 17px;\n    border-left:1px solid #263b55;\n    min-width:105px\n}\n.af-summary-stat>span {\n    font-size:21px;\n    color:#8bbfff\n}\n.af-summary-stat strong {\n    display:block;\n    font-size:14px\n}\n.af-summary-stat small {\n    display:block;\n    font-size:9px;\n    color:#8fa3bc;\n    margin-top:2px\n}\n.af-grid {\n    display:grid;\n    grid-template-columns:1.35fr 1fr 1fr;\n    gap:13px\n}\n.af-card {\n    background:linear-gradient(145deg,#111f31,#0d1929);\n    border:1px solid #263b55;\n    border-radius:11px;\n    overflow:hidden;\n    min-width:0\n}\n.af-card-head {\n    height:43px;\n    display:flex;\n    align-items:center;\n    justify-content:space-between;\n    padding:0 13px;\n    border-bottom:1px solid #263b55;\n    background:#132338\n}\n.af-card-head>div {\n    display:flex;\n    align-items:center;\n    gap:9px\n}\n.af-card-head strong {\n    font-size:12px;\n    font-weight:700\n}\n.af-card-icon {\n    font-size:17px;\n    color:#80baff\n}\n.af-card-tag {\n    font-size:8px;\n    letter-spacing:1px;\n    color:#7891ad\n}\n.af-map-card {\n    grid-row:span 2\n}\n.af-map {\n    height:clamp(260px,38vh,520px);\n    min-height:260px;\n    position:relative;\n    overflow:hidden;\n    background:#142235;\n}\n.af-leaflet-map {\n    position:absolute;\n    inset:0;\n    width:100%;\n    height:100%;\n    z-index:1;\n    background:#142235;\n}\n.af-map-coord {\n    z-index:500;\n    pointer-events:none;\n}\n.af-map-no-fix {\n    position:absolute;\n    z-index:500;\n    left:50%;\n    top:50%;\n    transform:translate(-50%,-50%);\n    padding:9px 13px;\n    border:1px solid #8ca6c455;\n    border-radius:7px;\n    background:#081522dd;\n    color:#e8f0fb;\n    font-size:12px;\n    text-align:center;\n    pointer-events:none;\n}\n.af-leaflet-tooltip {\n    background:#102238;\n    border:1px solid #6686a8;\n    color:#edf5ff;\n    box-shadow:none;\n    font-weight:700;\n}\n.af-leaflet-tooltip-selected {\n    background:#063b30;\n    border-color:#20d69a;\n    color:#ffffff;\n}\n.af-leaflet-tooltip:before {\n    border-top-color:#6686a8;\n}\n.af-map-grid {\n    position:absolute;\n    inset:0;\n    background-image:linear-gradient(#b6c3a21a 1px,transparent 1px),linear-gradient(90deg,#b6c3a21a 1px,transparent 1px);\n    background-size:38px 38px\n}\n.af-map-contours {\n    position:absolute;\n    inset:-20%;\n    border:1px solid #a5b48c44;\n    border-radius:44%;\n    transform:rotate(-20deg);\n    box-shadow:0 0 0 24px #a5b48c13,0 0 0 48px #a5b48c13,0 0 0 74px #a5b48c13\n}\n.af-map-road {\n    position:absolute;\n    height:3px;\n    background:#b8b18b99;\n    border:1px solid #d2c69b66;\n    transform-origin:left center\n}\n.road-one {\n    width:120%;\n    left:-10%;\n    top:60%;\n    transform:rotate(-18deg)\n}\n.road-two {\n    width:90%;\n    left:20%;\n    top:15%;\n    transform:rotate(52deg)\n}\n.road-three {\n    width:80%;\n    left:0;\n    top:80%;\n    transform:rotate(-42deg)\n}\n.af-map-label {\n    position:absolute;\n    font-size:8px;\n    letter-spacing:2px;\n    color:#d3dfc3a6\n}\n.label-a {\n    top:18px;\n    left:20px\n}\n.label-b {\n    right:20px;\n    bottom:22px\n}\n.af-map-coord {\n    position:absolute;\n    top:17px;\n    right:17px;\n    background:#0b1729cc;\n    border:1px solid #7892a844;\n    border-radius:5px;\n    padding:6px 8px;\n    font-size:9px;\n    color:#c3d7ee\n}\n.af-map-pin {\n    position:absolute;\n    display:flex;\n    align-items:center;\n    gap:6px;\n    transform:translate(-50%,-50%);\n    z-index:2\n}\n.af-map-pin span {\n    width:30px;\n    height:30px;\n    border-radius:50% 50% 50% 0;\n    transform:rotate(-45deg);\n    background:#16b978;\n    border:2px solid #c7ffe4;\n    display:grid;\n    place-items:center;\n    color:#fff;\n    box-shadow:0 0 20px #17d88b88\n}\n.af-map-pin span::first-letter {\n    transform:rotate(45deg)\n}\n.af-map-pin b {\n    background:#081522dd;\n    color:#fff;\n    border:1px solid #22d68a;\n    padding:5px 8px;\n    border-radius:5px;\n    font-size:9px\n}\n.af-map-ring {\n    position:absolute;\n    width:95px;\n    height:95px;\n    border:1px dashed #35e6a4aa;\n    border-radius:50%;\n    transform:translate(-50%,-50%);\n    box-shadow:0 0 25px #16b97822\n}\n.af-map-scale {\n    position:absolute;\n    left:17px;\n    bottom:15px;\n    color:#fff;\n    font-size:12px\n}\n.af-map-scale small {\n    font-size:9px;\n    margin-left:5px\n}\n.af-map-overlay {\n    position:absolute;\n    bottom:14px;\n    right:14px;\n    background:#081522bb;\n    border:1px solid #ffffff25;\n    border-radius:5px;\n    padding:6px 8px;\n    font-size:8px;\n    letter-spacing:1px;\n    color:#c4d7eb\n}\n.af-map-overlay small {\n    display:block;\n    font-size:7px;\n    letter-spacing:0;\n    color:#9fb1c4;\n    margin-top:3px\n}\n.af-map-footer {\n    display:flex;\n    flex-wrap:wrap;\n    gap:12px;\n    padding:10px 13px;\n    color:#91a5bd;\n    font-size:9px\n}\n.af-map-footer span {\n    display:flex;\n    align-items:center;\n    gap:5px\n}\n.legend-dot {\n    width:6px;\n    height:6px;\n    border-radius:50%;\n    display:inline-block\n}\n.green-dot {\n    background:#2ee49a\n}\n.grey-dot {\n    background:#8b9aad\n}\n.af-data-list {\n    padding:5px 13px 10px\n}\n.af-data-list>div {\n    display:flex;\n    justify-content:space-between;\n    align-items:center;\n    padding:9px 0;\n    border-bottom:1px solid #22344a;\n    gap:8px\n}\n.af-data-list>div:last-child {\n    border:0\n}\n.af-data-list span {\n    font-size:10px;\n    color:#94a8c0\n}\n.af-data-list b {\n    font-size:11px;\n    color:#e8f1fc;\n    text-align:right\n}\n.af-data-list .af-source {\n    color:#72baff;\n    background:#16385c;\n    border-radius:4px;\n    padding:3px 6px\n}\n.af-data-list .af-small-value {\n    font-size:8px;\n    font-weight:500;\n    color:#9db0c7\n}\n.af-spark-window {\n    margin-left: 9px;\n    color: #7894b3;\n    font-size: 8px;\n    font-weight: 500;\n    letter-spacing: .06em;\n}\n.af-axis-list {\n    padding:5px 13px 8px\n}\n.af-axis-list>div {\n    display:grid;\n    grid-template-columns:24px 52px minmax(0, 1fr);\n    align-items:center;\n    gap:10px;\n    padding:10px 0;\n    border-bottom:1px solid #22344a\n}\n.af-axis-list>div:last-child {\n    border:0\n}\n.af-axis-list b {\n    font-size:10px;\n    color:#91a6c0\n}\n.af-axis-list strong {\n    font-size:12px\n}\n.af-spark {\n    display:block;\n    width:100%;\n    min-width:0;\n    height:30px;\n    overflow:visible;\n    flex:1 1 auto\n}\n.af-spark polyline {\n    fill:none;\n    stroke:currentColor;\n    stroke-width:1.7;\n    stroke-linecap:round;\n    stroke-linejoin:round;\n    vector-effect:non-scaling-stroke\n}\n.green-spark {\n    color:#31d98d\n}\n.blue-spark {\n    color:#42aaff\n}\n.amber-spark {\n    color:#f2b44d\n}\n.af-incident-card,.af-preview-card {\n    grid-column:span 1\n}\n.af-incident-list {\n    padding:8px\n}\n.af-incident-row {\n    display:flex;\n    align-items:center;\n    gap:9px;\n    padding:9px;\n    background:#172438;\n    border:1px solid #2b3c52;\n    border-radius:7px;\n    margin-bottom:6px;\n    font-size:9px;\n    flex-wrap:wrap\n}\n.af-incident-row strong {\n    font-size:10px\n}\n.af-incident-row>span:not(.af-fire-tag) {\n    color:#91a5bd\n}\n.af-incident-row b {\n    color:#ff8b8b;\n    margin-left:auto\n}\n.af-incident-row small {\n    color:#8298b2\n}\n.af-fire-tag {\n    background:#5a202b;\n    color:#ff7785;\n    padding:4px 6px;\n    border-radius:4px;\n    font-weight:800;\n    font-size:8px\n}\n.af-empty {\n    padding:24px 14px;\n    text-align:center;\n    color:#8094ad;\n    font-size:11px\n}\n.af-preview {\n    height:clamp(78px,11vh,112px);\n    background:#0a1523;\n    display:grid;\n    place-items:center;\n    overflow:hidden\n}\n.af-preview img {\n    width:100%;\n    height:100%;\n    object-fit:cover\n}\n.af-preview-empty {\n    text-align:center;\n    color:#8ca3bd\n}\n.af-preview-empty>span {\n    font-size:28px;\n    display:block;\n    color:#6087b1\n}\n.af-preview-empty strong {\n    display:block;\n    font-size:11px;\n    margin:5px\n}\n.af-preview-empty small {\n    font-size:9px;\n    color:#6f849e\n}\n.af-empty-state {\n    text-align:center;\n    padding:70px 20px;\n    color:#9cb0c8\n}\n.af-empty-icon {\n    font-size:48px;\n    color:#55aaff\n}\n.af-empty-state h2 {\n    color:#e9f2fc;\n    font-size:20px\n}\n.af-empty-state p {\n    font-size:12px\n}\n.af-empty-state code {\n    color:#7dc1ff\n}\n.af-footer {\n    display:flex;\n    justify-content:space-between;\n    color:#617892;\n    font-size:8px;\n    letter-spacing:1.2px;\n    padding:14px 2px 0\n}\n@media(max-width:1150px) {\n    .af-sidebar {\n        width:175px;\n        flex-basis:175px\n    }\n    .af-top {\n        align-items:flex-start;\n        flex-direction:column\n    }\n    .af-kpis {\n        flex-wrap:wrap\n    }\n    .af-grid {\n        grid-template-columns:1fr 1fr\n    }\n    .af-map-card {\n        grid-row:span 2\n    }\n    .af-summary-stat {\n        min-width:80px;\n        padding:0 10px\n    }\n}\n@media(max-width:760px) {\n    .af-shell {\n        display:block\n    }\n    .af-sidebar {\n        width:auto;\n        padding:12px\n    }\n    .af-brand {\n        padding-bottom:10px\n    }\n    .af-nav {\n        display:flex;\n        overflow:auto;\n        margin-top:10px\n    }\n    .af-nav-item {\n        white-space:nowrap;\n        padding:8px\n    }\n    .af-connection {\n        display:none\n    }\n    .af-main {\n        padding:14px\n    }\n    .af-grid {\n        grid-template-columns:1fr\n    }\n    .af-map-card {\n        grid-row:auto\n    }\n    .af-summary {\n        flex-wrap:wrap;\n        gap:12px\n    }\n    .af-summary-drone {\n        min-width:100%\n    }\n    .af-summary-stat {\n        border-left:0;\n        padding:0 8px\n    }\n    .af-toolbar {\n        flex-wrap:wrap\n    }\n    .af-toolbar-note {\n        margin-left:0\n    }\n    .af-kpis {\n        width:100%\n    }\n    .af-kpi {\n        flex:1\n    }\n    .af-incident-card,.af-preview-card {\n        grid-column:auto\n    }\n    .af-footer {\n        gap:10px;\n        flex-wrap:wrap\n    }\n}\n.af-view {\n    min-width:0;\n    min-height:0\n}\n.af-nav-count {\n    margin-left:auto;\n    background:#672b37;\n    color:#ff9aa5;\n    border-radius:10px;\n    padding:2px 6px;\n    font-size:10px\n}\n.af-secondary-view {\n    flex:1;\n    overflow:auto;\n    padding:8px 2px 18px\n}\n.af-page-heading {\n    display:flex;\n    align-items:center;\n    justify-content:space-between;\n    border-bottom:1px solid #1c3048;\n    padding:4px 0 16px;\n    margin-bottom:14px\n}\n.af-page-heading h1 {\n    font-size:25px;\n    margin:5px 0 3px\n}\n.af-page-heading p {\n    margin:0;\n    color:#91a4bd;\n    font-size:12px\n}\n.af-page-stat {\n    background:#101f32;\n    border:1px solid #263b55;\n    border-radius:9px;\n    padding:10px 16px;\n    text-align:center\n}\n.af-page-stat strong {\n    display:block;\n    font-size:20px\n}\n.af-page-stat small {\n    font-size:9px;\n    color:#9eafc5\n}\n.af-filterbar {\n    align-items:center;\n    padding:8px 0 14px;\n    gap:12px;\n    color:#9aadc5;\n    font-size:10px\n}\n.af-filterbar select {\n    background:#12243a;\n    color:#eff6ff;\n    border:1px solid #357fc0;\n    border-radius:7px;\n    padding:8px 10px\n}\n.af-filterbar input[type=range],.af-secondary-card input[type=range] {\n    accent-color:#3a9dff;\n    max-width:260px\n}\n.af-action-button {\n    border:1px solid #2c4663;\n    background:#132338;\n    color:#cfe2f7;\n    border-radius:6px;\n    padding:7px 10px;\n    cursor:pointer\n}\n.af-secondary-list {\n    display:grid;\n    gap:9px;\n    max-width:1000px\n}\n.af-secondary-card {\n    background:linear-gradient(145deg,#111f31,#0d1929);\n    border:1px solid #263b55;\n    border-radius:10px;\n    padding:16px;\n    color:#e8f0fb\n}\n.af-incident-detail {\n    display:flex;\n    align-items:center;\n    gap:14px\n}\n.af-incident-badge {\n    width:34px;\n    height:34px;\n    display:grid;\n    place-items:center;\n    border-radius:8px;\n    background:#5a202b;\n    color:#ff8792;\n    font-weight:900\n}\n.af-secondary-content {\n    flex:1;\n    min-width:0\n}\n.af-secondary-title {\n    display:flex;\n    align-items:center;\n    gap:10px\n}\n.af-secondary-content p {\n    font-size:11px;\n    color:#9eb0c6;\n    margin:7px 0\n}\n.af-secondary-content small {\n    font-size:10px;\n    color:#8196b0\n}\n.af-empty-panel {\n    min-height:180px;\n    display:flex;\n    flex-direction:column;\n    align-items:center;\n    justify-content:center;\n    gap:8px;\n    border:1px dashed #2a405b;\n    border-radius:10px;\n    color:#8da3be;\n    text-align:center\n}\n.af-empty-panel>span {\n    font-size:28px;\n    color:#5caeff\n}\n.af-empty-panel strong {\n    color:#dce9f8;\n    font-size:13px\n}\n.af-empty-panel small {\n    font-size:10px\n}\n.af-history-list {\n    max-height:calc(100% - 130px);\n    overflow:auto;\n    border:1px solid #263b55;\n    border-radius:9px\n}\n.af-history-row {\n    display:flex;\n    align-items:center;\n    gap:12px;\n    padding:11px 14px;\n    border-bottom:1px solid #20334a\n}\n.af-history-row:last-child {\n    border:0\n}\n.af-history-row>div {\n    flex:1\n}\n.af-history-row strong {\n    display:block;\n    font-size:11px\n}\n.af-history-row small {\n    display:block;\n    color:#8ea3bd;\n    font-size:9px;\n    margin-top:3px\n}\n.af-history-row time {\n    font-size:9px;\n    color:#91a6bf\n}\n.af-history-dot {\n    width:9px;\n    height:9px;\n    border-radius:50%;\n    background:#4da8ff\n}\n.event-incident {\n    background:#ff6475\n}\n.event-status {\n    background:#27d995\n}\n.event-preview {\n    background:#b18cff\n}\n.af-fleet-grid {\n    display:grid;\n    grid-template-columns:repeat(auto-fill,minmax(230px,1fr));\n    gap:12px\n}\n.af-fleet-card {\n    display:flex;\n    flex-direction:column;\n    align-items:flex-start;\n    gap:9px;\n    text-align:left;\n    background:linear-gradient(145deg,#111f31,#0d1929);\n    border:1px solid #263b55;\n    border-radius:10px;\n    padding:16px;\n    color:#e8f0fb;\n    cursor:pointer\n}\n.af-fleet-card:hover {\n    border-color:#3d91d7;\n    background:#14263c\n}\n.af-fleet-card-top {\n    width:100%;\n    display:flex;\n    align-items:center;\n    justify-content:space-between\n}\n.af-fleet-card>strong {\n    font-size:16px\n}\n.af-fleet-state {\n    font-size:9px;\n    color:#81bfff;\n    background:#17365b;\n    padding:4px 7px;\n    border-radius:5px\n}\n.af-fleet-metrics {\n    display:flex;\n    gap:20px;\n    width:100%;\n    padding:9px 0;\n    border-top:1px solid #263b55;\n    border-bottom:1px solid #263b55\n}\n.af-fleet-metrics span {\n    font-size:9px;\n    color:#8ea3bd\n}\n.af-fleet-metrics b {\n    display:block;\n    color:#e7f1fc;\n    font-size:11px;\n    margin-top:4px\n}\n.af-fleet-card>small {\n    color:#8095af;\n    font-size:9px\n}\n.af-settings-grid {\n    display:grid;\n    grid-template-columns:repeat(2,minmax(220px,1fr));\n    gap:12px;\n    max-width:1000px\n}\n.af-secondary-card h3 {\n    font-size:13px;\n    margin:0 0 7px\n}\n.af-secondary-card p {\n    font-size:10px;\n    line-height:1.5;\n    color:#91a5bd;\n    margin:0 0 14px\n}\n.af-setting-control {\n    display:flex;\n    justify-content:space-between;\n    font-size:10px;\n    margin-bottom:8px\n}\n.af-setting-control b {\n    color:#7fc1ff\n}\n.af-setting-toggle {\n    display:flex;\n    align-items:center;\n    gap:9px;\n    font-size:11px;\n    color:#dce8f7\n}\n.af-setting-toggle input,.af-filterbar input[type=checkbox] {\n    accent-color:#3a9dff\n}\n.af-connection-status {\n    display:flex;\n    align-items:center;\n    gap:8px;\n    font-size:10px;\n    color:#3bdf9c;\n    margin:12px 0\n}\n.af-connection-status i {\n    width:7px;\n    height:7px;\n    border-radius:50%;\n    background:#27d995;\n    box-shadow:0 0 8px #27d995\n}\n@media(max-width:760px) {\n    .af-settings-grid {\n        grid-template-columns:1fr\n    }\n    .af-page-heading {\n        align-items:flex-start;\n        gap:10px\n    }\n    .af-history-row {\n        align-items:flex-start\n    }\n    .af-history-row time {\n        max-width:110px;\n        text-align:right\n    }\n}\n/* =========================================================\n   AEROFLEET MONITOR — RESPONSIVE LAYOUT\n   ========================================================= */\n/* The dashboard wrapper grows with its content.\n   The host page only needs to scroll when content really overflows. */\n.af-shell {\n    display: flex;\n    width: 100%;\n    height: auto;\n    min-height: 0;\n    max-height: none;\n    overflow: hidden;\n    align-items: stretch;\n}\n.af-main {\n    height: auto;\n    min-height: 0;\n    overflow: visible;\n}\n.af-monitor-view {\n    display: flex;\n    flex: 0 0 auto;\n    flex-direction: column;\n    min-height: 0;\n    overflow: visible;\n}\n/* Three equal columns:\n   - Map: left column, spanning two rows.\n   - GPS and gyroscope: middle column.\n   - Acceleration, incidents and camera: right column. */\n.af-monitor-view .af-grid {\n    display: grid;\n    flex: 0 0 auto;\n    grid-template-columns: repeat(3, minmax(0, 1fr));\n    grid-template-rows: repeat(3, 165px);\n    grid-template-areas:\n    \"map gps acceleration\"\n    \"map gyroscope incidents\"\n    \". . camera\";\n    gap: 13px;\n    min-height: 0;\n    align-items: stretch;\n}\n.af-monitor-view .af-grid > .af-card {\n    width: 100%;\n    height: 100%;\n    min-width: 0;\n    min-height: 0;\n    align-self: stretch;\n}\n/* Explicit placement keeps the cards in the same order at every refresh. */\n.af-monitor-view .af-map-card {\n    grid-area: map;\n    display: flex;\n    flex-direction: column;\n}\n.af-monitor-view .af-grid > .af-card:nth-child(2) {\n    grid-area: gps;\n}\n.af-monitor-view .af-grid > .af-card:nth-child(3) {\n    grid-area: acceleration;\n}\n.af-monitor-view .af-grid > .af-card:nth-child(4) {\n    grid-area: gyroscope;\n}\n.af-monitor-view .af-grid > .af-card:nth-child(5) {\n    grid-area: incidents;\n}\n.af-monitor-view .af-grid > .af-card:nth-child(6) {\n    grid-area: camera;\n}\n/* The map fills the full height of its double-sized card. */\n.af-monitor-view .af-map {\n    flex: 1 1 auto;\n    height: auto;\n    min-height: 0;\n}\n.af-monitor-view .af-map-footer {\n    flex: 0 0 auto;\n}\n/* Consistent card headers and readable telemetry. */\n.af-monitor-view .af-card-head {\n    flex: 0 0 42px;\n    height: 42px;\n    min-height: 42px;\n    padding: 0 14px;\n}\n.af-monitor-view .af-card-head strong {\n    font-size: 14px;\n}\n.af-monitor-view .af-card-tag {\n    font-size: 9px;\n}\n.af-monitor-view .af-data-list {\n    padding: 3px 14px 6px;\n}\n.af-monitor-view .af-data-list > div {\n    min-height: 23px;\n    padding: 5px 0;\n}\n.af-monitor-view .af-data-list span {\n    font-size: 12px;\n}\n.af-monitor-view .af-data-list b {\n    font-size: 13px;\n}\n.af-monitor-view .af-data-list .af-small-value {\n    font-size: 10px;\n}\n.af-monitor-view .af-axis-list {\n    padding: 3px 14px 6px;\n}\n.af-monitor-view .af-axis-list > div {\n    min-height: 30px;\n    padding: 5px 0;\n}\n.af-monitor-view .af-axis-list b {\n    font-size: 12px;\n}\n.af-monitor-view .af-axis-list strong {\n    font-size: 15px;\n}\n.af-monitor-view .af-spark {\n    font-size: 19px;\n}\n/* Incident and camera content stays inside cards. */\n.af-monitor-view .af-incident-list {\n    padding: 7px;\n}\n.af-monitor-view .af-incident-row {\n    gap: 7px;\n    padding: 8px;\n    font-size: 11px;\n}\n.af-monitor-view .af-incident-row strong {\n    font-size: 11px;\n}\n.af-monitor-view .af-preview {\n    height: auto;\n    min-height: 0;\n    flex: 1 1 auto;\n}\n.af-monitor-view .af-preview-empty strong {\n    font-size: 13px;\n}\n.af-monitor-view .af-preview-empty small {\n    font-size: 10px;\n}\n/* Increase the overall interface typography slightly. */\n.af-main {\n    font-size: 14px;\n}\n.af-top h1 {\n    font-size: 29px;\n}\n.af-top p {\n    font-size: 13px;\n}\n.af-nav-item {\n    font-size: 15px;\n}\n.af-summary-drone strong {\n    font-size: 17px;\n}\n.af-summary-stat strong {\n    font-size: 15px;\n}\n.af-summary-stat small,\n.af-summary-drone small {\n    font-size: 10px;\n}\n.af-toolbar-note {\n    font-size: 11px;\n}\n.af-footer {\n    padding-top: 11px;\n}\n/* Medium screens: keep the map wide and arrange the other cards in two columns. */\n@media (max-width: 1100px) {\n    .af-shell {\n        min-height: 0;\n    }\n    .af-monitor-view .af-grid {\n        grid-template-columns: repeat(2, minmax(0, 1fr));\n        grid-template-rows: auto;\n        grid-template-areas:\n        \"map map\"\n        \"gps acceleration\"\n        \"gyroscope incidents\"\n        \"camera camera\";\n    }\n    .af-monitor-view .af-map-card {\n        grid-row: auto;\n        min-height: 260px;\n    }\n    .af-monitor-view .af-map {\n        min-height: 210px;\n    }\n    .af-monitor-view .af-grid > .af-card:not(.af-map-card) {\n        min-height: 155px;\n    }\n    .af-monitor-view .af-preview {\n        min-height: 150px;\n    }\n}\n/* Phones and narrow windows: one column, natural page height. */\n@media (max-width: 760px) {\n    .af-shell {\n        display: block;\n        width: 100%;\n        min-height: 0;\n        overflow: visible;\n    }\n    .af-sidebar {\n        width: auto;\n        flex-basis: auto;\n        padding: 12px;\n    }\n    .af-main {\n        padding: 12px;\n    }\n    .af-monitor-view .af-grid {\n        grid-template-columns: minmax(0, 1fr);\n        grid-template-rows: auto;\n        grid-template-areas:\n        \"map\"\n        \"gps\"\n        \"acceleration\"\n        \"gyroscope\"\n        \"incidents\"\n        \"camera\";\n    }\n    .af-monitor-view .af-map-card {\n        min-height: 260px;\n    }\n    .af-monitor-view .af-grid > .af-card:not(.af-map-card) {\n        min-height: 150px;\n    }\n    .af-monitor-view .af-preview {\n        min-height: 150px;\n    }\n    .af-settings-grid {\n        grid-template-columns: 1fr;\n    }\n}\n/* Short desktop displays: slightly shorter equal-sized cards. */\n@media (min-width: 1101px) and (max-height: 820px) {\n    .af-monitor-view .af-grid {\n        grid-template-rows: repeat(3, 145px);\n        gap: 11px;\n    }\n    .af-monitor-view .af-card-head {\n        flex-basis: 38px;\n        height: 38px;\n        min-height: 38px;\n    }\n    .af-monitor-view .af-data-list > div {\n        min-height: 20px;\n        padding: 3px 0;\n    }\n    .af-monitor-view .af-axis-list > div {\n        min-height: 27px;\n        padding: 3px 0;\n    }\n}\n/* Let the Node-RED page provide the scrollbar only when needed. */\n.nr-dashboard-page,\n.nrdb-ui-page {\n    overflow-y: auto;\n}\n/* Final desktop proportions: taller cards and an almost square map. */\n@media (min-width: 1101px) {\n    .af-monitor-view .af-grid {\n        grid-template-columns: minmax(0, 0.9fr) repeat(2, minmax(0, 1.05fr));\n        grid-template-rows: repeat(3, 250px);\n        gap: 14px;\n    }\n\n    .af-monitor-view .af-map-card {\n        grid-row: span 2;\n        min-height: 0;\n    }\n\n    .af-monitor-view .af-grid > .af-card {\n        min-height: 0;\n        height: 100%;\n    }\n\n    .af-monitor-view .af-map {\n        flex: 1 1 auto;\n        min-height: 0;\n    }\n}\n\n/* Keep the layout proportionate on shorter desktop displays. */\n@media (min-width: 1101px) and (max-height: 820px) {\n    .af-monitor-view .af-grid {\n        grid-template-rows: repeat(3, 220px);\n    }\n}\n\n\n/* =========================================================\n   CAMERA PREVIEW\n   Square preview with the complete image visible.\n   ========================================================= */\n\n.af-monitor-view .af-preview-card {\n    display: flex;\n    flex-direction: column;\n    min-width: 0;\n    min-height: 0;\n    height: auto;\n}\n\n.af-monitor-view .af-preview {\n    display: flex;\n    flex: 0 0 auto;\n    align-items: center;\n    justify-content: center;\n    width: 100%;\n    height: auto;\n    min-width: 0;\n    min-height: 0;\n    aspect-ratio: 1 / 1;\n    position: relative;\n    box-sizing: border-box;\n    overflow: hidden;\n    padding: 0;\n    background: #0a1523;\n}\n\n.af-monitor-view .af-preview > img {\n    display: block;\n    width: 100%;\n    height: 100%;\n    min-width: 0;\n    min-height: 0;\n    object-fit: contain;\n    object-position: center;\n}\n\n.af-monitor-view .af-preview-empty {\n    display: flex;\n    flex: 1 1 auto;\n    flex-direction: column;\n    align-items: center;\n    justify-content: center;\n    width: 100%;\n    height: 100%;\n    min-height: 0;\n    box-sizing: border-box;\n    padding: 18px;\n    margin: 0;\n    gap: 8px;\n    text-align: center;\n}\n\n.af-monitor-view .af-preview-empty > span,\n.af-monitor-view .af-preview-empty strong,\n.af-monitor-view .af-preview-empty small {\n    display: block;\n    width: 100%;\n    margin: 0;\n    text-align: center;\n}\n\n.af-monitor-view .af-preview-empty > span {\n    font-size: 30px;\n    line-height: 1.2;\n}\n\n.af-monitor-view .af-preview-empty strong {\n    font-size: 15px;\n    line-height: 1.4;\n}\n\n.af-monitor-view .af-preview-empty small {\n    font-size: 11px;\n    line-height: 1.4;\n}\n\n/* Keep a useful square preview on narrow screens. */\n@media (max-width: 760px) {\n    .af-monitor-view .af-preview {\n        min-height: 0;\n        aspect-ratio: 1 / 1;\n    }\n}\n\n\n/* =========================================================\n   AERO FLEET - SMALL LABELS / SECONDARY TYPOGRAPHY\n   Increase peripheral labels without overpowering main data.\n   ========================================================= */\n\n/* Section eyebrow and top-level helper labels */\n.af-eyebrow {\n    font-size: 11px !important;\n    letter-spacing: 1.8px;\n}\n\n.af-top p {\n    font-size: 14px !important;\n}\n\n/* KPI captions and last-update metadata */\n.af-kpi small {\n    font-size: 11px !important;\n}\n\n.af-clock small,\n.af-clock span {\n    font-size: 10px !important;\n}\n\n/* Drone selector, selected drone and live-feed label */\n.af-select-wrap label {\n    font-size: 11px !important;\n    letter-spacing: 1.2px;\n}\n\n.af-selected small {\n    font-size: 11px !important;\n}\n\n.af-pill {\n    font-size: 10px !important;\n}\n\n.af-toolbar-note {\n    font-size: 12px !important;\n}\n\n/* Small labels at the right side of each card header */\n.af-card-tag {\n    font-size: 10px !important;\n    letter-spacing: .8px;\n}\n\n/* Map labels, coordinates, scale and legend */\n.af-map-label {\n    font-size: 10px !important;\n    letter-spacing: 1.5px;\n}\n\n.af-map-coord {\n    font-size: 10px !important;\n}\n\n.af-map-pin b {\n    font-size: 10px !important;\n}\n\n.af-map-scale small {\n    font-size: 10px !important;\n}\n\n.af-map-overlay {\n    font-size: 10px !important;\n}\n\n.af-map-overlay small {\n    font-size: 9px !important;\n}\n\n.af-map-footer {\n    font-size: 11px !important;\n}\n\n/* Small metadata inside GPS and telemetry cards */\n.af-data-list .af-small-value {\n    font-size: 10px !important;\n}\n\n/* Incident timestamp, drone label and event metadata */\n.af-incident-row {\n    font-size: 11px !important;\n}\n\n.af-incident-row strong {\n    font-size: 12px !important;\n}\n\n.af-incident-row small {\n    font-size: 10px !important;\n}\n\n.af-fire-tag {\n    font-size: 9px !important;\n}\n\n/* Camera topic and helper text */\n.af-preview-empty small {\n    font-size: 11px !important;\n}\n\n/* Footer text along the bottom edges */\n.af-footer {\n    font-size: 10px !important;\n    letter-spacing: 1px;\n}\n\n/* Sidebar connection status */\n.af-connection {\n    font-size: 12px !important;\n}\n\n.af-connection b {\n    font-size: 10px !important;\n}\n\n/* Secondary-page helper text */\n.af-page-heading p,\n.af-secondary-content small,\n.af-history-row small,\n.af-history-row time,\n.af-fleet-card > small {\n    font-size: 11px !important;\n}\n\n/* Preserve readability on smaller screens without oversized labels. */\n@media (max-width: 760px) {\n    .af-eyebrow {\n        font-size: 10px !important;\n    }\n\n    .af-card-tag,\n    .af-map-footer,\n    .af-footer {\n        font-size: 9px !important;\n    }\n}\n\n\n/* Real Leaflet map: keep the map fitted to its card at every breakpoint. */\n.af-monitor-view .af-map {\n    min-height:260px;\n}\n.af-map .leaflet-container {\n    width:100%;\n    height:100%;\n    font-family:inherit;\n    background:#142235;\n}\n.af-map .leaflet-control-attribution {\n    font-size:9px;\n}\n.af-map .leaflet-control-zoom a {\n    color:#17304b;\n}\n@media (max-width: 760px) {\n    .af-monitor-view .af-map {\n        min-height:250px;\n    }\n}\n\\n\n/* =========================================================\n   MAP RECENTER + INCIDENT CLEAR CONTROLS\n   ========================================================= */\n.af-map-head-actions,\n.af-page-actions {\n    display: flex;\n    align-items: center;\n    gap: 10px;\n}\n\n.af-map-center-button {\n    display: inline-flex;\n    align-items: center;\n    justify-content: center;\n    gap: 6px;\n    padding: 6px 9px;\n    border: 1px solid #315a7d;\n    border-radius: 6px;\n    background: #142d47;\n    color: #cfe7ff;\n    font: inherit;\n    font-size: 11px;\n    font-weight: 700;\n    cursor: pointer;\n    transition: background .15s ease, border-color .15s ease;\n}\n\n.af-map-center-button:hover:not(:disabled) {\n    background: #1c4165;\n    border-color: #55aaff;\n}\n\n.af-map-center-button:disabled {\n    opacity: .4;\n    cursor: not-allowed;\n}\n\n.af-clear-button {\n    padding: 8px 12px;\n    border: 1px solid #783c49;\n    border-radius: 7px;\n    background: #351d2a;\n    color: #ffb5bd;\n    font: inherit;\n    font-size: 12px;\n    font-weight: 700;\n    cursor: pointer;\n    transition: background .15s ease, border-color .15s ease;\n}\n\n.af-clear-button:hover:not(:disabled) {\n    background: #542432;\n    border-color: #e56b7c;\n}\n\n.af-clear-button:disabled {\n    opacity: .4;\n    cursor: not-allowed;\n}\n\n@media (max-width: 760px) {\n    .af-map-head-actions {\n        gap: 5px;\n    }\n\n    .af-map-center-button {\n        padding: 5px 7px;\n    }\n\n    .af-map-center-button span {\n        display: none;\n    }\n\n    .af-page-actions {\n        align-items: flex-end;\n        flex-direction: column;\n    }\n}\n\n\n/* =========================================================\n   AEROFLEET - FINAL GRID PROPORTIONS\n   ========================================================= */\n\n@media (min-width: 1101px) {\n\n    .af-monitor-view .af-grid {\n        grid-template-columns: 0.95fr 1.1fr 1.1fr;\n        grid-template-rows: 250px 250px;\n        grid-template-areas:\n            \"map gps acceleration\"\n            \"camera gyroscope incidents\";\n        gap: 12px;\n        align-items: start;\n    }\n\n    /* Map */\n    .af-monitor-view .af-map-card {\n        grid-area: map;\n        height: 250px;\n    }\n\n    /* GPS */\n    .af-monitor-view .af-grid > .af-card:nth-child(2) {\n        grid-area: gps;\n    }\n\n    /* Acceleration */\n    .af-monitor-view .af-grid > .af-card:nth-child(3) {\n        grid-area: acceleration;\n    }\n\n    /* Gyroscope */\n    .af-monitor-view .af-grid > .af-card:nth-child(4) {\n        grid-area: gyroscope;\n        height: 250px;\n    }\n\n    /* Incidents */\n    .af-monitor-view .af-grid > .af-card:nth-child(5) {\n        grid-area: incidents;\n        height: 250px;\n    }\n\n    /* Camera */\n    .af-monitor-view .af-grid > .af-card:nth-child(6) {\n        grid-area: camera;\n        height: auto;\n        align-self: start;\n    }\n\n    .af-monitor-view .af-preview {\n        width: 100%;\n        aspect-ratio: 1 / 1;\n        height: auto !important;\n        min-height: 0 !important;\n        display: flex;\n        align-items: center;\n        justify-content: center;\n        overflow: hidden;\n    }\n\n    .af-monitor-view .af-preview > img {\n        width: 100%;\n        height: 100%;\n        min-height: 0 !important;\n        object-fit: contain;\n    }\n}",
+        "noerr": 0,
+        "storeOutMessages": true,
+        "passthru": true,
+        "resendOnRefresh": true,
+        "templateScope": "page:style",
+        "className": "",
+        "x": 1140,
+        "y": 580,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "e164d37192f64c99",
+        "type": "mqtt-broker",
+        "name": "Mosquitto - configure host",
+        "broker": "broker.hivemq.com",
+        "port": "1883",
+        "clientid": "aerofleet-flowfuse-dashboard",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": "4",
+        "keepalive": "15",
+        "cleansession": true,
+        "autoUnsubscribe": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willPayload": "",
+        "willMsg": {},
+        "userProps": "",
+        "sessionExpiry": ""
+    },
+    {
+        "id": "a610532da85a4946",
+        "type": "ui-group",
+        "name": "Control Room",
+        "page": "44b33d72c6664272",
+        "width": "12",
+        "height": "12",
+        "order": 1,
+        "showTitle": false,
+        "className": "af-dashboard-group",
+        "visible": "true",
+        "disabled": "false",
+        "groupType": "default",
+        "keepLoaded": false,
+        "tab": ""
+    },
+    {
+        "id": "44b33d72c6664272",
+        "type": "ui-page",
+        "name": "Fleet Monitor",
+        "ui": "a6485df8556b4443",
+        "path": "/control-room",
+        "icon": "dashboard",
+        "layout": "grid",
+        "theme": "840ada5852604212",
+        "breakpoints": [
+            {
+                "name": "Default",
+                "px": "0",
+                "cols": "12"
+            },
+            {
+                "name": "Tablet",
+                "px": "576",
+                "cols": "12"
+            },
+            {
+                "name": "Desktop",
+                "px": "768",
+                "cols": "12"
+            }
+        ],
+        "tabs": [],
+        "order": 2,
+        "className": "",
+        "visible": "true",
+        "disabled": "false"
+    },
+    {
+        "id": "a6485df8556b4443",
+        "type": "ui-base",
+        "name": "AeroFleet Dashboard",
+        "path": "/dashboard",
+        "appIcon": "",
+        "includeClientData": true,
+        "acceptsClientConfig": [
+            "ui-control",
+            "ui-notification"
+        ],
+        "showPathInSidebar": false,
+        "headerContent": "page",
+        "navigationStyle": "none",
+        "titleBarStyle": "hidden",
+        "showReconnectNotification": true,
+        "notificationDisplayTime": 5,
+        "showDisconnectNotification": true,
+        "allowInstall": true
+    },
+    {
+        "id": "840ada5852604212",
+        "type": "ui-theme",
+        "name": "AeroFleet Dark Theme",
+        "colors": {
+            "surface": "#101f32",
+            "primary": "#258de5",
+            "bgPage": "#08111e",
+            "groupBg": "#08111e",
+            "groupOutline": "#1d3048"
+        },
+        "sizes": {
+            "pagePadding": "8px",
+            "groupGap": "8px",
+            "groupBorderRadius": "12px",
+            "widgetGap": "8px"
+        }
+    },
+    {
+        "id": "10eefd2f469ea993",
+        "type": "global-config",
+        "env": [],
+        "modules": {
+            "@flowfuse/node-red-dashboard": "1.37.0"
+        }
+    }
+]

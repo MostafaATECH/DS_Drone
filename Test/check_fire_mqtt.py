@@ -9,9 +9,9 @@ from dataclasses import replace
 from queue import Empty
 from uuid import uuid4
 
-from MQTT_Communication.camera_messages import CameraMessages
+from hardware_data_collection.collect_drone_data import ROOT, load_settings, utc_now
+from hardware_data_collection.prepare_fire_reports import FireReports
 from MQTT_Communication.publish_mqtt import MqttPublisher
-from MQTT_Communication.run_gateway import ROOT, load_settings, utc_now
 from Test.check_mqtt import make_client, require, subscribe, wait_for_connection
 from Test.test_model_image import preview_path, save_preview
 
@@ -127,7 +127,7 @@ def check_synthetic(settings):
     detection = Detection("fire", 0.9, (20, 25, 200, 54))
     jpeg = encode_preview(image, (detection,))
     incident = FireIncident(f"synthetic-fire-{token}", utc_now(), 0.9, time.monotonic())
-    updates = CameraMessages(publisher, replay=None)
+    updates = FireReports(publisher, replay=None)
     try:
         inbox = subscribe(observer, settings, f"{test_root}/#")
         # Queue the incident while disconnected, then send it using the same detection ID.

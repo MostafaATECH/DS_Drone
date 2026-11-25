@@ -8,10 +8,12 @@ from unittest.mock import Mock, call, patch
 import paho.mqtt.client as mqtt
 
 from MQTT_Communication.publish_mqtt import MqttPublisher, OFFLINE_STATUS
-from MQTT_Communication.run_gateway import ROOT
+from project_config import load_config
 
 
-SETTINGS = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8"))["mqtt"]
+SETTINGS = {**load_config()["mqtt"], "drone_id": "drone01", "client_id": None,
+            "host": "broker.hivemq.com", "port": 1883, "keepalive_s": 15,
+            "username": None, "password": None, "tls": False}
 NOW = "2026-11-21T10:00:00Z"
 STREAMING = {"stm_connected": True, "streaming": True,
              "stream_state": "STREAMING", "imu_status": "READY"}
@@ -34,7 +36,7 @@ class MqttTests(unittest.TestCase):
 
     def connect(self, now):
         """Simulate a successful CONNACK at a controlled monotonic time."""
-        with patch("MQTT_Communication.publish_mqtt.time.monotonic", return_value=now):
+        with patch("MQTT_Communication._publisher_runtime.time.monotonic", return_value=now):
             self.client.on_connect(self.client, None, None, SimpleNamespace(is_failure=False), None)
 
     def test_transport_settings_and_distinct_ids(self):
@@ -104,3 +106,14 @@ class MqttTests(unittest.TestCase):
             call.disconnect(),
             call.loop_stop(),
         ])
+
+    def test_demo_will_waits_for_broker_without_publishing_offline(self):
+        """Keep TCP open silently while waiting for the broker to close it."""
+        connection = self.client.socket.return_value
+        connection.recv.side_effect = [b"pending acknowledgement", b""]
+        self.publisher.close(demo_will=True)
+        self.client.loop_stop.assert_called_once_with()
+        self.client.publish.assert_not_called()
+        self.client.disconnect.assert_not_called()
+        self.assertEqual(connection.recv.call_args_list, [call(4096), call(4096)])
+        self.assertEqual(connection.mock_calls[-1], call.close())

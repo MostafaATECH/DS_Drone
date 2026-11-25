@@ -2,7 +2,7 @@
 
 ## Connection and subscriptions
 
-Use `broker.hivemq.com`, TCP port `1883`, MQTT 3.1.1 and a 15-second keepalive. Leave TLS off and username and password empty for this public test endpoint. The shared root is `aerofleet-dsdrone-4f7c92`. The prefix helps keep demos separate. Anyone connected to the public broker can read or publish these topics.
+Use `broker.hivemq.com`, TCP port `1883` and MQTT 3.1.1. The gateway uses a five-second keepalive for the Last Will demo. The dashboard can use its own keepalive. Leave TLS off and username and password empty for this public test endpoint. The shared root is `aerofleet-dsdrone-4f7c92`. The prefix helps keep demos separate. Anyone connected to the public broker can read or publish these topics.
 
 Use a unique client ID per connection. The gateways use `dsdrone-4f7c92-drone01` and `dsdrone-4f7c92-drone02`. In Node-RED, set the broker configuration's Client ID to `dsdrone-4f7c92-cristian-node-red`. Add a suffix if you run another instance. The independent Python logger generates its own ID beginning with `dsdrone-log-`. See the [second PC setup](../README.md#set-up-the-second-pc) for the gateway profile.
 

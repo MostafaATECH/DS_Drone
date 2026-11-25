@@ -7,16 +7,19 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from MQTT_Communication.read_stm32_serial import FrameParser, Stm32Reader, find_stm32_port
-from MQTT_Communication.replay_gps import GpsReplay, load_route
-from MQTT_Communication.run_gateway import ROOT, Gateway, load_settings, utc_now
+from hardware_data_collection.collect_drone_data import ROOT, Gateway, load_settings, utc_now
+from hardware_data_collection.read_stm32_stream import FrameParser, Stm32Reader, find_stm32_port
+from hardware_data_collection.replay_gps_route import GpsReplay, load_route
+from project_config import load_config
 
 
 SAMPLE = b"$DS1,M,IDLE,0.12,-0.04,9.81,0.57,1.15,-0.57\r\n"
 STAMP = "2026-11-21T10:00:00.000Z"
 NEXT_STAMP = "2026-11-21T10:00:10.000Z"
 ROUTE = ROOT / "upm_drone_gps_loop.json"
-DEFAULT_SETTINGS = json.loads((ROOT / "config.example.json").read_text(encoding="utf-8"))
+DEFAULT_SETTINGS = load_config()
+SERIAL_SETTINGS = {**DEFAULT_SETTINGS["serial"], "port": None, "usb_serial_number": None,
+                   "heartbeat_timeout_s": 5, "retry_interval_s": 2, "measurement_freshness_s": 5}
 
 
 def fake_port(device, usb_serial, vid=0x0483, pid=0x374E):
@@ -100,7 +103,7 @@ class GatewayTests(unittest.TestCase):
 
     def test_pause_timeout_and_reopen(self):
         """Discard old readings on pause and USB loss, then follow the same board to a new COM port."""
-        reader = Stm32Reader(DEFAULT_SETTINGS["serial"])
+        reader = Stm32Reader(SERIAL_SETTINGS)
         gateway = Gateway(reader, GpsReplay(ROUTE, 5))
         original = Mock()
         original.read.side_effect = [b"STM32 debug\n", b"$DS1,S,CALIBRATING\n" + SAMPLE,
@@ -112,9 +115,9 @@ class GatewayTests(unittest.TestCase):
         old_port = fake_port("COM3", "stm32")
         new_port = fake_port("COM9", "stm32")
         second = fake_port("COM4", "other")
-        with (patch("MQTT_Communication.read_stm32_serial.list_ports.comports",
+        with (patch("hardware_data_collection.read_stm32_stream.list_ports.comports",
                     side_effect=[[old_port], [new_port, second]]),
-              patch("MQTT_Communication.read_stm32_serial.serial.Serial",
+              patch("hardware_data_collection.read_stm32_stream.serial.Serial",
                     side_effect=[original, reopened]) as open_serial):
             self.assertEqual(gateway.poll(0, STAMP)[0]["stream_state"], "DISCONNECTED")
             self.assertEqual(gateway.poll(0.1, STAMP)[0]["stream_state"], "CALIBRATING")
@@ -150,14 +153,14 @@ class GatewayTests(unittest.TestCase):
 
     def test_b1_resume_requires_new_measurement(self):
         """Keep GPS still while paused and emit the next fix only after a new measurement."""
-        reader = Stm32Reader(DEFAULT_SETTINGS["serial"])
+        reader = Stm32Reader(SERIAL_SETTINGS)
         gateway = Gateway(reader, GpsReplay(ROUTE, 5))
         link = Mock()
         link.read.side_effect = [SAMPLE, b"$DS1,S,PAUSED\n", b"$DS1,S,STREAMING\n",
                                  SAMPLE, b"$DS1,S,STREAMING\n", b"$DS1,S,STREAMING\n"]
-        with (patch("MQTT_Communication.read_stm32_serial.list_ports.comports",
+        with (patch("hardware_data_collection.read_stm32_stream.list_ports.comports",
                     return_value=[fake_port("COM3", "stm32")]),
-              patch("MQTT_Communication.read_stm32_serial.serial.Serial", return_value=link)):
+              patch("hardware_data_collection.read_stm32_stream.serial.Serial", return_value=link)):
             self.assertEqual(gateway.poll(0, STAMP)[1]["position"]["longitude"], -3.6293443)
             self.assertIsNone(gateway.poll(0.1, STAMP)[1])
             self.assertIsNone(gateway.poll(0.2, STAMP)[1])
@@ -168,14 +171,23 @@ class GatewayTests(unittest.TestCase):
             self.assertFalse(status["streaming"])
             self.assertIsNone(telemetry)
 
-    def test_local_settings_override(self):
-        """Apply one local serial setting while keeping the other shared defaults."""
-        with (patch.object(Path, "exists", return_value=True),
-              patch.object(Path, "read_text", side_effect=[json.dumps(DEFAULT_SETTINGS),
-                                                          '{"serial":{"port":"COM9"}}'])):
+    def test_load_settings_from_one_config_file(self):
+        """Read the edited settings directly from config.json."""
+        config = {**DEFAULT_SETTINGS, "serial": {**SERIAL_SETTINGS, "port": "COM9"},
+                  "mqtt": {**DEFAULT_SETTINGS["mqtt"], "drone_id": "drone02", "client_id": None}}
+        with patch.object(Path, "read_text", autospec=True, return_value=json.dumps(config)) as read:
             settings = load_settings(ROOT)
-        self.assertEqual(settings["serial"], DEFAULT_SETTINGS["serial"] | {"port": "COM9"})
-        self.assertEqual(settings["gps"], DEFAULT_SETTINGS["gps"])
+        read.assert_called_once_with(ROOT / "config.json", encoding="utf-8-sig")
+        self.assertEqual(settings, config)
+
+    def test_config_comments_preserve_slashes_in_strings(self):
+        """Ignore comments and preserve // after escaped quotes in JSON values."""
+        gps = {**DEFAULT_SETTINGS["gps"], "path": 'https://example.test/route"//loop.json'}
+        config = {**DEFAULT_SETTINGS, "gps": gps}
+        contents = "// Gateway settings\n" + json.dumps(config, indent=2)
+        contents = contents.replace('  "gps": {\n', '  "gps": { // Route settings\n')
+        with patch.object(Path, "read_text", return_value=contents):
+            self.assertEqual(load_config(ROOT), config)
 
     def test_missing_gps_keeps_imu_telemetry(self):
         """Confirm missing GPS yields JSON null and the timestamp is valid UTC."""
@@ -183,7 +195,7 @@ class GatewayTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 load_route(ROUTE)
         with patch.object(Stm32Reader, "poll"):
-            reader = Stm32Reader(DEFAULT_SETTINGS["serial"])
+            reader = Stm32Reader(SERIAL_SETTINGS)
             now_stamp = utc_now()
             self.assertRegex(now_stamp, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$")
             sample, = list(FrameParser().feed(SAMPLE))

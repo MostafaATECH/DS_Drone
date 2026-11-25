@@ -9,11 +9,13 @@ Use the [demo guide](DEMO_GUIDE.md) for the presentation and the [MQTT handoff](
 | Location | Responsibility |
 | --- | --- |
 | `src/`, `Include/` | STM32 application and C headers. `imu.c` calibrates, samples, and processes the IMU. `board_io.c` handles B1 and the RGB LED. `main.c` owns the stream state and serial output. |
-| `MQTT_Communication/` | `read_stm32_serial.py` parses frames and reconnects. `replay_gps.py` tracks the simulated route. `run_gateway.py` combines inputs. `publish_mqtt.py` owns the MQTT connection, `camera_messages.py` prepares incident messages, and `log_incidents.py` independently saves incident records. |
+| `hardware_data_collection/` | `collect_drone_data.py` brings together the inputs. `read_stm32_stream.py` reads USB frames, `replay_gps_route.py` follows the simulated route, and `prepare_fire_reports.py` matches fire detections to a position. |
+| `MQTT_Communication/` | `publish_mqtt.py` creates the publisher and shows the Last Will, topics, and delivery settings. `payloads.py` defines the outgoing JSON. `_publisher_runtime.py` tracks connections and when messages are due. |
+| `tools/` | `log_incidents.py` is an optional MQTT subscriber that saves fire reports. |
 | `AI_Vision/` | `fire_detection.py` runs the shared fire detector and JPEG renderer. `camera_stream.py` owns capture and inference on a worker thread. `fire_episodes.py` confirms a local incident from successive frames. |
 | `Test/` | Automated checks and command-line tests for the broker, camera, and still images. Generated files go in `Test/output/`. |
 | `boards/`, `confs/`, `.vscode/`, `CMakeLists.txt` | Zephyr board settings, compiler inputs, and VS Code build and flash tasks. Generated firmware goes in `build/`. |
-| Project root | `project_config.py` loads shared defaults from `config.example.json` and overrides from ignored `config.local.json`. The GPS replay uses `upm_drone_gps_loop.json`. Vision uses `best.pt`. |
+| Project root | `project_config.py` reads settings from `config.json`. The GPS replay uses `upm_drone_gps_loop.json`. Vision uses `best.pt`. |
 
 ## Windows setup
 
@@ -102,29 +104,21 @@ Place the IMU on a stable surface, open the monitor, and reset the board. Keep t
 
 Close the serial monitor with `Ctrl+]` first. Run one gateway per board from the repository root after [setting up Python](#windows-setup).
 
-The first PC can use `config.example.json` as shipped for `drone01`. Put any overrides in the ignored root file `config.local.json`. This example keeps the camera disabled and uses automatic ST-LINK discovery. For the second PC, start with the [drone02 example](#set-up-the-second-pc).
-
-```json
-{
-  "serial": {"port": null},
-  "mqtt": {"drone_id": "drone01", "client_id": "dsdrone-4f7c92-drone01"},
-  "camera": {"enabled": false}
-}
-```
+Edit [config.json](config.json) on each PC. The shipped file uses `mqtt.drone_id` set to `drone01`, automatic ST-LINK discovery, and the camera off. With `mqtt.client_id` set to `null`, the gateway appends the drone ID to `dsdrone-4f7c92-`, giving `dsdrone-4f7c92-drone01`. A nonempty `mqtt.client_id` replaces the generated value. Keep credentials out of commits because `config.json` is tracked.
 
 With `serial.port: null`, the reader requires a unique ST-LINK match (`0483:374E`) and remembers the board's USB serial number when available. Set a specific COM port, such as `"COM3"`, if needed. Set `serial.usb_serial_number` from `serial.tools.list_ports -v` to select one board among several. Relative GPS and model paths start at the repo root.
 
-The example configuration leaves the camera off. Use `--camera off` to force this mode on a PC with only the base dependencies, or `--camera on` to enable the Brio with the [optional vision dependencies](#test-the-detector-on-a-photograph) installed.
+The shipped configuration leaves the camera off. Use `--camera off` to force this mode on a PC with only the base dependencies, or `--camera on` to enable the Brio with the [optional vision dependencies](#test-the-detector-on-a-photograph) installed.
 
 ```powershell
 # Choose one command per gateway.
-& .\.venv\Scripts\python.exe -m MQTT_Communication.run_gateway --camera off
-& .\.venv\Scripts\python.exe -m MQTT_Communication.run_gateway --camera on
+& .\.venv\Scripts\python.exe -m hardware_data_collection.collect_drone_data --camera off
+& .\.venv\Scripts\python.exe -m hardware_data_collection.collect_drone_data --camera on
 ```
 
 Look for `INFO: MQTT connected as dsdrone-4f7c92-drone01` and `STM32` status lines when the port or board state changes. An open port stays `DISCONNECTED` until a valid frame arrives. `CALIBRATING` and `PAUSED` can have `stm_connected: true` while `streaming` is false. Once measurements arrive, the gateway prints a `Telemetry` JSON line about once per second using the latest fresh IMU sample. Each sample is printed at most once. A `$DS1,M,...` line can establish streaming if the gateway opens a port mid-stream. When the board has explicitly reported calibration, pause, or error, the gateway waits for `STREAMING` before accepting another measurement.
 
-In the illustrative frame above, `read_stm32_serial.py` reads `az = 9.81 m/s²` and `gx = 0.57 deg/s`. `replay_gps.py` supplies the first simulated position at `40.3899329, -3.6293443`. `run_gateway.py` keeps `accel_m_s2.z = 9.81`, converts the gyro once to `gyro_rad_s.x ≈ 0.00995`, and uses the PC's UTC receipt time for the IMU timestamp. The fix gets its own UTC replay timestamp. The position stays `null` if a fresh fix is unavailable, including when the route file is missing or invalid.
+In the illustrative frame above, `read_stm32_stream.py` reads `az = 9.81 m/s²` and `gx = 0.57 deg/s`. `replay_gps_route.py` supplies the first simulated position at `40.3899329, -3.6293443`. `collect_drone_data.py` keeps `accel_m_s2.z = 9.81`, converts the gyro once to `gyro_rad_s.x ≈ 0.00995`, and uses the PC's UTC receipt time for the IMU timestamp. The fix gets its own UTC replay timestamp. The position stays `null` if a fresh fix is unavailable, including when the route file is missing or invalid.
 
 B1 pause stops telemetry and holds the GPS cursor. A fresh sample after resume uses the next GPS point. USB removal discards the old sample and closes the port on a serial error or after five seconds of silence. The gateway retries every two seconds by default. Automatic discovery follows the same identified board if its COM number changes, and a new session starts with fresh frames. Press `Ctrl+C` to stop the gateway, send offline status, and release the COM port.
 
@@ -136,7 +130,7 @@ Cristian's implementation reference contains the four payload examples, filters,
 
 `drone_topic()` joins `<topic_root>/<drone_id>/<message_type>`. The shared root is `aerofleet-dsdrone-4f7c92`. Use the defaults for `drone01` and the [second PC configuration](#set-up-the-second-pc) for `drone02`. The gateways use `dsdrone-4f7c92-drone01` and `dsdrone-4f7c92-drone02` as MQTT client IDs. Cristian can set `dsdrone-4f7c92-cristian-node-red` in the Node-RED broker settings.
 
-The classroom broker is `broker.hivemq.com:1883`, MQTT 3.1.1 over TCP with a 15-second keepalive. Leave `username` and `password` as `null` and `tls` as `false` for this endpoint. Anyone on the shared public broker can read or publish under the prefix. It reduces accidental topic collisions and provides no access control.
+The classroom broker is `broker.hivemq.com:1883`, MQTT 3.1.1 over TCP with a five-second publisher keepalive. Leave `username` and `password` as `null` and `tls` as `false` for this endpoint. Anyone on the shared public broker can read or publish under the prefix. It reduces accidental topic collisions and provides no access control.
 
 | Message | Node-RED subscription | QoS | Retained | Payload |
 | --- | --- | --- | --- | --- |
@@ -178,6 +172,39 @@ The gateway sends telemetry at up to 1 Hz while a fresh valid measurement is ava
 
 The gateway registers the retained QoS 1 Last Will `{"online":false}` before connecting. HiveMQ sends it when it detects unexpected loss of the gateway connection. On `Ctrl+C`, `MqttPublisher.close()` explicitly publishes the same retained offline payload and waits briefly for its acknowledgement. When the dashboard sees `online: false`, the current board state is unknown. During `STREAMING`, mark measurements stale after five seconds without telemetry. Check status age and the dashboard's own broker connection too.
 
+### Run the live dashboard demo
+
+On a Windows PC without Node.js, run `winget install --id OpenJS.NodeJS.LTS --exact` and reopen PowerShell. To install and start Node-RED from the repository root:
+
+```powershell
+$redHome = Join-Path $PWD.Path 'build\node-red-demo\runtime'
+New-Item -ItemType Directory -Force -Path $redHome | Out-Null
+npm.cmd install --prefix $redHome node-red '@flowfuse/node-red-dashboard@1.37.0'
+$flowFile = Join-Path $redHome 'aerofleet-local.json'
+if (-not (Test-Path -LiteralPath $flowFile)) {
+    Copy-Item -LiteralPath '.\AeroFleet_Dashboard.json' -Destination $flowFile
+}
+node.exe "$redHome\node_modules\node-red\red.js" --userDir $redHome -D uiHost=127.0.0.1 $flowFile
+```
+
+Keep that terminal open. In a second PowerShell window, open the dashboard in Chrome:
+
+```powershell
+Start-Process "$env:ProgramFiles\Google\Chrome\Application\chrome.exe" 'http://127.0.0.1:1880/dashboard/control-room'
+```
+
+Use `http://127.0.0.1:1880/` to open the editor. On a PC with a project-local portable Node.js install, use the `node.exe` and `npm.cmd` from that directory.
+
+The startup commands load a local copy of [AeroFleet_Dashboard.json](AeroFleet_Dashboard.json). To use a separate Node-RED installation, import that export as a replacement for the old flow and deploy it with `@flowfuse/node-red-dashboard` installed. The real drone topics feed the dashboard. The simulator is manual and uses its own IDs. The STM32 stream tile shows `STREAMING`, `PAUSED`, or `DISCONNECTED` separately from the gateway's `ONLINE` or `OFFLINE` badge. Speed is estimated from successive simulated GPS fixes. The replay supplies neither altitude nor a satellite count, so the dashboard shows `N/A` for those fields.
+
+```powershell
+& .\.venv\Scripts\python.exe -m hardware_data_collection.collect_drone_data --demo-will
+```
+
+1. Wait for `STREAMING` and advancing telemetry. Press B1, show that telemetry stops while MQTT stays online, then press B1 again.
+2. Unplug only the STM32 USB cable. The STM32 stream shows `DISCONNECTED` while the gateway remains online. Reconnect it and hold the board still during calibration.
+3. Press `Ctrl+C` once. With `--demo-will`, the gateway stops MQTT traffic and leaves TCP open so the broker can time it out. Expect the broker's Last Will about 7.5 seconds after its last received packet. The time measured from your keypress can differ slightly. Without `--demo-will`, `Ctrl+C` sends the clean-shutdown status immediately.
+
 MQTT delivery happens in two exchanges. First the gateway publishes to HiveMQ. Then HiveMQ delivers to each subscriber at the QoS allowed by that subscription. Telemetry is QoS 0 and individual readings can be lost. Status is QoS 1 and the receiver of each QoS 1 exchange sends a `PUBACK`, so duplicates are possible. Retaining status lets a new subscriber receive the latest stored value for that topic immediately.
 
 ### Match a fire incident and its preview
@@ -217,7 +244,7 @@ The MQTT check verifies telemetry receipt, retained online status for a late sub
 2. In a second PowerShell window from DS_Drone, start one camera-enabled gateway. Wait for `Camera AVAILABLE`, then point the Brio at the fire photograph on a screen. Keep the camera aimed at the intended demo image when using the public broker.
 
    ```powershell
-   & .\.venv\Scripts\python.exe -m MQTT_Communication.run_gateway --camera on
+   & .\.venv\Scripts\python.exe -m hardware_data_collection.collect_drone_data --camera on
    ```
 
 3. The watcher prints when it receives metadata and saves the first matched JPEG as `Test/output/mqtt_fire_preview.jpg`. If the episode started before the watcher subscribed, clear the camera view of the fire image for at least two seconds and show the image again. Stop the gateway with `Ctrl+C`.
@@ -229,7 +256,7 @@ For an independent broker check, run `& .\.venv\Scripts\python.exe -m Test.check
 In a separate PowerShell window from DS_Drone, start the independent consumer. Wait for `Listening` before generating a fire episode. `Ctrl+C` stops it. Only the base requirements are needed.
 
 ```powershell
-& .\.venv\Scripts\python.exe -m MQTT_Communication.log_incidents
+& .\.venv\Scripts\python.exe -m tools.log_incidents
 ```
 
 The logger subscribes to `aerofleet-dsdrone-4f7c92/+/incident` at QoS 1. It writes `Test/output/incidents.jsonl`, adding the drone ID from the topic. It checks the payload and skips malformed data with a warning. It reads saved `(drone_id, event_id)` pairs before connecting, so restarting it against the same file still skips repeated IDs. Use one logger per output file. For a separate run, pass `--output .\Test\output\my_incidents.jsonl`. The output directory is ignored by Git.
@@ -275,7 +302,7 @@ $projectPython = '.\.venv\Scripts\python.exe'
 & $projectPython -m Test.check_camera --enable --show
 ```
 
-The Brio 100 was `046d:094c` at DirectShow index 1 on this PC. Index 0 was the laptop camera. The default `camera.source` selects the Brio by USB ID, so the worker looks up its current index again when reopening. To use a different device, set `camera.source` in `config.local.json` to the listed USB ID or numeric index. `--enable` turns the camera on for the standalone check and `--source 1` overrides its device selection. Close the local window with `Q`, `Esc`, or `Ctrl+C`. To check recovery, unplug the Brio, wait for `UNAVAILABLE`, plug it back in, and wait for `AVAILABLE`. The missing-device path can also be exercised with `--enable --source ffff:ffff --seconds 6`.
+The Brio 100 was `046d:094c` at DirectShow index 1 on this PC. Index 0 was the laptop camera. The default `camera.source` selects the Brio by USB ID, so the worker looks up its current index again when reopening. To use a different device, set `camera.source` in `config.json` to the listed USB ID or numeric index. `--enable` turns the camera on for the standalone check and `--source 1` overrides its device selection. Close the local window with `Q`, `Esc`, or `Ctrl+C`. To check recovery, unplug the Brio, wait for `UNAVAILABLE`, plug it back in, and wait for `AVAILABLE`. The missing-device path can also be exercised with `--enable --source ffff:ffff --seconds 6`.
 
 | State | Meaning |
 | --- | --- |
@@ -286,7 +313,7 @@ The Brio 100 was `046d:094c` at DirectShow index 1 on this PC. Index 0 was the l
 
 `CameraWorker` reads and processes one frame at a time on its own thread. It uses the same `process_frame()` as the photo test, so boxes, labels and JPEG settings match. It replaces the latest preview in one slot and keeps up to 16 pending local incident notifications for the check to drain. It releases the camera after a failure and waits `camera.retry_s` seconds before reopening, initially five. Shutdown signals the worker and waits briefly for the active capture or inference call to finish.
 
-The demo uses the shared confidence threshold of 0.25 when `camera.confidence` is `null`. A number in `config.local.json` overrides it for live capture. One positive frame can show orange boxes in the preview. After three consecutive processed frames with a fire detection, the tracker creates one local incident with a stable `drone01-fire-…` ID. It rearms after two seconds of observed absence. Change `camera.confirmation_frames` or `camera.absence_s` to tune these demo choices. Camera interruptions reset an unconfirmed streak and preserve a confirmed ID while the scene is unobserved. The detector selects the checkpoint's `fire` label by name.
+The demo uses the shared confidence threshold of 0.25 when `camera.confidence` is `null`. Set it to a number in `config.json` to change it for live capture. One positive frame can show orange boxes in the preview. After three consecutive processed frames with a fire detection, the tracker creates one local incident with a stable `drone01-fire-…` ID. It rearms after two seconds of observed absence. Change `camera.confirmation_frames` or `camera.absence_s` to tune these demo choices. Camera interruptions reset an unconfirmed streak and preserve a confirmed ID while the scene is unobserved. The detector selects the checkpoint's `fire` label by name.
 
 For the local episode check, point the Brio at a screen showing the fire photograph, hold it in view, then remove it from view for at least two seconds. Watch for one `Confirmed fire` line per episode. The camera unit checks use `& $projectPython -m unittest discover -s Test -p test_camera_stream.py -v`.
 
@@ -302,19 +329,18 @@ For the local episode check, point the Brio at a screen showing the fire photogr
 
 ## Set up the second PC
 
-Open PowerShell in that PC's DS_Drone checkout. Install the base requirements and copy the [drone02 example](config.drone02.example.json). If `config.local.json` already exists, merge the example into it. The local file is ignored by Git.
+Open [config.json](config.json) on the second PC and change `mqtt.drone_id` to `drone02`. Leave `mqtt.client_id` as `null` so the gateway generates `dsdrone-4f7c92-drone02`. Keep the same broker and topic root on both PCs. If you used a local override file with an older checkout, transfer any settings you still need into `config.json`.
+
+Install the base requirements in that PC's checkout if needed.
 
 ```powershell
 python -m venv .venv
 $projectPython = '.\.venv\Scripts\python.exe'
 & $projectPython -m pip install -r requirements.txt
-if (-not (Test-Path .\config.local.json)) {
-    Copy-Item .\config.drone02.example.json .\config.local.json
-}
 & $projectPython -m serial.tools.list_ports -v
 ```
 
-Leave `serial.port` as `null` for automatic ST-LINK discovery. If needed, set it to the ST-LINK COM port reported on that PC or set `serial.usb_serial_number` to identify one board among several. Keep the shared broker and topic root from `config.example.json`. With the second board running the DS_Drone firmware, run `& $projectPython -m MQTT_Communication.run_gateway --camera off`. Expect `MQTT connected as dsdrone-4f7c92-drone02` and `camera_status: "DISABLED"`.
+Leave `serial.port` as `null` for automatic ST-LINK discovery. If needed, set it to the ST-LINK COM port reported on that PC or set `serial.usb_serial_number` to identify one board among several. With the second board running the DS_Drone firmware, run `& $projectPython -m hardware_data_collection.collect_drone_data --camera off`. Expect `MQTT connected as dsdrone-4f7c92-drone02` and `camera_status: "DISABLED"`.
 
 ## Demo recovery checklist
 

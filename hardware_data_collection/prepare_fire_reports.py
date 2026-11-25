@@ -3,11 +3,13 @@
 import logging
 from collections import deque
 
+from MQTT_Communication.payloads import incident_payload
+
 
 LOGGER = logging.getLogger(__name__)
 
 
-class CameraMessages:
+class FireReports:
     """Keep a bounded in-memory queue of incident snapshots while MQTT is unavailable."""
 
     def __init__(self, publisher, replay):
@@ -25,13 +27,8 @@ class CameraMessages:
                 position = self.replay.latest_position(incident.observed_at, timestamp=incident.timestamp)
             if len(self.pending) == self.pending.maxlen:
                 LOGGER.warning("Incident queue full. Dropping %s", self.pending[0]["event_id"])
-            self.pending.append({
-                "event_id": incident.event_id,
-                "timestamp": incident.timestamp,
-                "type": incident.type,
-                "confidence": incident.confidence,
-                "position": position,
-            })
+            self.pending.append(incident_payload(incident.event_id, incident.timestamp, incident.type,
+                                                 incident.confidence, position))
             LOGGER.info("Confirmed %s %s (%.2f, %s)", incident.type, incident.event_id,
                         incident.confidence, "simulated observer position" if position else "position unavailable")
 
